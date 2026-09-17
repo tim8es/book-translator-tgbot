@@ -24,7 +24,7 @@ Customer access is based only on immutable numeric Telegram `user_id` values in 
 
 Telegram `username` is metadata only and never grants access.
 
-The administrator is identified by numeric `ADMIN_USER_ID` and `ADMIN_CHAT_ID` configured locally in **Bot Config**.
+The administrator is identified by numeric `ADMIN_USER_ID` and `ADMIN_CHAT_ID` configured locally in **Admin Config**.
 
 ## Supported files
 
@@ -86,15 +86,16 @@ The delivery state is persisted after each completed step so an execution failur
 
 ## Critical translated-file safety rule
 
-When the administrator replies with a translated document, the workflow must persist:
+When the administrator replies with a translated document, the workflow persists:
 
 ```text
 translated_file_id
 status = DELIVERY_PENDING
 delivery_step = RESULT_PENDING
+next_retry_at
 ```
 
-**before** attempting to send that document to the customer.
+before attempting to send that document to the customer.
 
 Only after the Telegram customer-delivery call succeeds may the workflow set:
 
@@ -102,6 +103,7 @@ Only after the Telegram customer-delivery call succeeds may the workflow set:
 status = DONE
 delivery_step = COMPLETE
 completed_at = now
+next_retry_at = null
 ```
 
 This is the central reliability guarantee of the MVP.
@@ -110,7 +112,7 @@ This is the central reliability guarantee of the MVP.
 
 A recovery schedule runs every 5 minutes.
 
-It processes a bounded number of due unfinished tasks and uses increasing backoff instead of retrying every pending row on every schedule tick.
+It queries `ADMIN_CARD_PENDING`, `SOURCE_PENDING`, `CUSTOMER_CONFIRM_PENDING` and `RESULT_PENDING`, then uses `next_retry_at` and `retry_count` to select due work.
 
 Backoff sequence:
 
@@ -118,42 +120,44 @@ Backoff sequence:
 5 min → 15 min → 30 min → 1 h → 3 h → 6 h → 12 h → 24 h
 ```
 
-Recovery is capped so a permanently invalid Telegram chat/file does not consume resources forever. The failed task remains visible for manual inspection.
+At most 20 due tasks are selected per run and automatic recovery is capped at 8 attempts.
 
-`WAITING_RESULT`, `DONE`, `COMPLETE` and rejected tasks are not active recovery work.
+`WAITING_RESULT`, `DONE` and `COMPLETE` are not active recovery work.
 
 ## Persisted message material
 
 To recover notification steps without the original execution context, the task row stores:
 
 ```text
+admin_chat_id
 admin_task_text
 source_caption
 customer_confirmation_text
 ```
 
-Together with `source_file_id`, `translated_file_id`, chat IDs and `delivery_step`, this is enough to continue a pending delivery after an n8n restart.
+Together with `source_file_id`, `translated_file_id`, customer chat ID and `delivery_step`, this is enough to continue a pending delivery after an n8n restart.
 
 ## Customer flow
 
 1. Telegram Trigger receives update.
-2. Normalize sender, chat, message/document and reply metadata.
-3. Route admin/customer.
-4. Check customer numeric ID in `bt_bot_users` on every customer interaction.
-5. `/start` returns guidance only.
-6. Supported source file passes duplicate guard.
-7. Allocate six-digit task number.
-8. Persist task with `ADMIN_CARD_PENDING`.
-9. Send admin task card and store its Telegram message ID.
-10. Send source file to admin.
-11. Confirm task to customer.
-12. Set `PROCESSING / WAITING_RESULT`.
+2. Admin Config attaches local admin IDs.
+3. Normalize sender, chat, message/document and reply metadata.
+4. Route admin/customer.
+5. Check customer numeric ID in `bt_bot_users` on every customer interaction.
+6. `/start` returns guidance only.
+7. Supported source file passes duplicate guard.
+8. Allocate six-digit task number.
+9. Persist task with `ADMIN_CARD_PENDING`.
+10. Send admin task card and store its Telegram message ID.
+11. Send source file to admin.
+12. Confirm task to customer.
+13. Set `PROCESSING / WAITING_RESULT`.
 
 ## Admin completion flow
 
 1. Administrator replies to the stored task-card Telegram message with a document.
 2. Find task by `admin_task_message_id`.
-3. Reject unknown or already completed tasks.
+3. Reject unknown, completed or already pending-delivery tasks.
 4. Persist the translated `file_id` and `RESULT_PENDING` state.
 5. Attempt customer delivery.
 6. On success mark `DONE / COMPLETE` and confirm completion to admin.
@@ -176,15 +180,13 @@ bt_bot_users
 bt_bot_tasks
 ```
 
-No `bt_bot_state` table is required.
-
-The exact schemas are documented in `docs/data-model.md`.
+No `bt_bot_state` table is required. The exact schemas are documented in `docs/data-model.md`.
 
 ## Secrets and configuration
 
 - Telegram bot token lives in an n8n Telegram API credential.
 - The workflow JSON must not contain a real bot token or credential binding.
-- Admin numeric IDs are configured locally after import.
+- Admin numeric IDs are configured locally in `Admin Config` after import.
 - The public repository contains placeholders/example IDs only.
 
 ## Deployment requirement
