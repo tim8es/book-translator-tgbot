@@ -19,16 +19,6 @@ MVP uses **two** n8n Data Tables:
 | `status` | String | yes | `ACTIVE` or `BLOCKED`. |
 | `created_at` | Date | yes | Whitelist creation time. |
 
-Example:
-
-```text
-user_id    111111111
-username   example_user
-name       Иван
-status     ACTIVE
-created_at 2026-09-17T12:00:00.000Z
-```
-
 ## `bt_bot_tasks`
 
 | Column | n8n type | Required | Notes |
@@ -40,16 +30,16 @@ created_at 2026-09-17T12:00:00.000Z
 | `username` | String | no | Telegram username snapshot. |
 | `source_file_id` | String | yes | Telegram `file_id` of source book. |
 | `source_filename` | String | yes | Original filename. |
-| `translated_file_id` | String | no | Telegram `file_id` uploaded by admin; persisted **before** delivery. |
+| `translated_file_id` | String | no | Telegram `file_id` uploaded by admin; persisted before delivery. |
 | `status` | String | yes | `NEW`, `PROCESSING`, `DELIVERY_PENDING`, `DONE`, `REJECTED`. |
-| `delivery_step` | String | yes | Durable next-step state; values below. |
+| `admin_chat_id` | String | yes | Admin chat snapshot used by delivery and recovery. |
 | `admin_task_message_id` | Number | no initially | Admin task-card message ID used to map completion replies. |
-| `admin_task_text` | String | yes | Persisted task-card text so recovery can resend without original execution data. |
+| `admin_task_text` | String | yes | Persisted task-card text for recovery. |
 | `source_caption` | String | yes | Persisted source-file caption for recovery. |
 | `customer_confirmation_text` | String | yes | Persisted customer confirmation for recovery. |
-| `retry_count` | Number | yes | Number of persistent recovery attempts; start at `0`. |
-| `retry_at` | Date | no | Earliest time the recovery workflow should retry. Empty/null means immediately eligible. |
-| `last_error` | String | no | Last recovery/send error summary when available. |
+| `delivery_step` | String | yes | Durable next-step state; values below. |
+| `retry_count` | Number | yes | Number of persistent recovery attempts; starts at `0`. |
+| `next_retry_at` | Date | no | Earliest time recovery may retry this task; null while waiting for manual translation or after completion. |
 | `created_at` | Date | yes | Task creation time. |
 | `completed_at` | Date | no | Successful result delivery time. |
 
@@ -91,28 +81,27 @@ DELIVERY_PENDING / RESULT_PENDING
 DONE / COMPLETE
 ```
 
-A task may also become `REJECTED` through future/manual handling; recovery must not process rejected rows.
-
 ### Critical persistence rule
 
-For administrator results the order must be:
+For administrator results the order is:
 
 ```text
 1. receive translated Telegram file_id
 2. store translated_file_id
 3. set status = DELIVERY_PENDING
 4. set delivery_step = RESULT_PENDING
-5. send document to customer
-6. only on success set DONE / COMPLETE
+5. set next_retry_at
+6. send document to customer
+7. only on success set DONE / COMPLETE
 ```
 
-Never reverse steps 2–5. Otherwise a network failure can lose the only durable reference to the translated file.
+This order prevents loss of the translated file reference during a network outage.
 
 ### Recovery fields
 
-Recovery runs every 5 minutes and only retries pending delivery steps whose `retry_at` is due.
+`Recovery Schedule` runs every 5 minutes. It queries only pending delivery steps, and `Select Due Recoveries` additionally checks `next_retry_at` and `retry_count`.
 
-Recommended backoff implemented by the workflow:
+Backoff implemented by the workflow:
 
 ```text
 retry 1  → +5 min
@@ -125,7 +114,7 @@ retry 7  → +12 h
 retry 8  → +24 h
 ```
 
-After the automatic retry cap is reached, leave the task visible with its last state/error for manual inspection rather than retrying forever.
+At most 20 due tasks are selected per recovery run and automatic recovery is capped at 8 attempts.
 
 ### Task number allocation
 
@@ -145,8 +134,8 @@ If you already created the old tables:
 
 1. Keep `bt_bot_users`.
 2. Add the new columns above to `bt_bot_tasks`.
-3. Existing active tasks should be reviewed manually before migration; set a correct `delivery_step` matching what has actually been delivered.
+3. Existing unfinished tasks should be reviewed manually before migration; set `delivery_step` to match what has actually been delivered.
 4. Delete `bt_bot_state`; it is no longer referenced.
 5. Import the new workflow and configure Telegram Trigger.
 
-For a fresh test install, simply create `bt_bot_users` and `bt_bot_tasks` using this schema.
+For a fresh test install, create only `bt_bot_users` and `bt_bot_tasks` using this schema.
