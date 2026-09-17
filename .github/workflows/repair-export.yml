@@ -1,0 +1,47 @@
+name: Repair workflow export
+
+on:
+  push:
+    branches:
+      - feat/mvp
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: feat/mvp
+
+      - name: Repair malformed export and verify JSON
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          path = Path('workflows/book-translator-mvp.json')
+          text = path.read_text()
+          old = '}]}}},"type":"n8n-nodes-base.dataTable","typeVersion":1.1,"position":[280,240]'
+          new = '}]}} ,"type":"n8n-nodes-base.dataTable","typeVersion":1.1,"position":[280,240]'
+          if old in text:
+              text = text.replace(old, new, 1)
+              path.write_text(text)
+          json.loads(path.read_text())
+          PY
+
+      - name: Commit repair when needed
+        run: |
+          if git diff --quiet; then
+            echo "No repair needed"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add workflows/book-translator-mvp.json
+          git commit -m "fix: repair n8n workflow JSON export"
+          git push origin HEAD:feat/mvp
