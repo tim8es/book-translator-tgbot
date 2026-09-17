@@ -43,6 +43,16 @@ for (const name of requiredNodes) {
   if (!byName.has(name)) errors.push(`Missing node: ${name}`);
 }
 
+for (const node of nodes.filter((node) => node.type === 'n8n-nodes-base.code')) {
+  const code = node.parameters?.jsCode ?? '';
+  try {
+    // Compile only; n8n globals are intentionally not executed here.
+    new Function(code);
+  } catch (error) {
+    errors.push(`${node.name}: invalid JavaScript syntax: ${error.message}`);
+  }
+}
+
 if (workflow.active !== false) errors.push('Exported workflow must be inactive');
 
 const telegramTriggers = nodes.filter((node) => node.type === 'n8n-nodes-base.telegramTrigger');
