@@ -13,7 +13,7 @@ In n8n:
 3. Paste the BotFather token.
 4. Save it.
 
-The token is stored only in the n8n credential. Do not paste it into `Bot Config` and never commit it to GitHub.
+The token is stored only in the n8n credential. Do not paste it into **Admin Config** and never commit it to GitHub.
 
 ## 2. Public HTTPS endpoint
 
@@ -39,7 +39,7 @@ The old `bt_bot_state` table is not used by this version.
 If you created tables for the old polling workflow:
 
 1. keep `bt_bot_users`;
-2. add the new state/recovery columns to `bt_bot_tasks`;
+2. add the new columns from `docs/data-model.md` to `bt_bot_tasks`;
 3. inspect existing unfinished task rows before assigning their `delivery_step`;
 4. remove `bt_bot_state` after migration.
 
@@ -57,11 +57,11 @@ The exported workflow is intentionally inactive and contains no credential bindi
 
 ## 5. Configure administrator
 
-Open **Bot Config** and set only the numeric Telegram IDs:
+Open **Admin Config** and set the numeric Telegram IDs:
 
 ```js
-const ADMIN_USER_ID = '123456789';
-const ADMIN_CHAT_ID = '123456789';
+let ADMIN_USER_ID = '123456789';
+let ADMIN_CHAT_ID = '123456789';
 ```
 
 For a private conversation with the bot these usually match.
@@ -74,7 +74,7 @@ Assign the Telegram API credential to:
 
 - `Telegram Trigger`;
 - all Telegram message/document send nodes in the main path;
-- all Telegram message/document send nodes in the recovery path.
+- all Telegram message/document send nodes reused by the recovery path.
 
 The workflow export intentionally contains no credentials, so this must be done after every fresh import.
 
@@ -123,7 +123,7 @@ Critical Telegram sends use short node-level retry:
 5 seconds between tries
 ```
 
-If the problem lasts longer, the task remains in a durable pending state. Recovery checks it later using `delivery_step`, `retry_count` and `retry_at`.
+If the problem lasts longer, the task remains in a durable pending state. Recovery checks it later using `delivery_step`, `retry_count` and `next_retry_at`.
 
 The administrator's translated `file_id` is written to `bt_bot_tasks` before attempting delivery to the customer. This means a temporary network failure does not require the administrator to upload the translated file again.
 
@@ -131,15 +131,16 @@ The administrator's translated `file_id` is written to `bt_bot_tasks` before att
 
 The scheduled recovery pass runs every 5 minutes but does not blindly retry every task.
 
-It skips:
+It selects only these steps:
 
-- `WAITING_RESULT`;
-- `COMPLETE`;
-- `DONE` tasks;
-- tasks whose `retry_at` has not arrived;
-- tasks that exceeded the automatic recovery cap.
+```text
+ADMIN_CARD_PENDING
+SOURCE_PENDING
+CUSTOMER_CONFIRM_PENDING
+RESULT_PENDING
+```
 
-A run processes at most a bounded batch, keeping the idle resource footprint small.
+Then it skips tasks whose `next_retry_at` has not arrived or whose `retry_count` reached the automatic cap. At most 20 due tasks are selected per recovery run.
 
 ## 11. First test
 
@@ -167,7 +168,7 @@ Check that:
 
 ### Telegram action nodes fail but Trigger works
 
-Check that every Telegram send node has the same intended credential assigned.
+Check that every Telegram send node has the intended credential assigned.
 
 ### Task remains pending after network returns
 
@@ -175,11 +176,10 @@ Check:
 
 - `delivery_step`;
 - `retry_count`;
-- `retry_at`;
-- `last_error`;
-- execution log for `Recovery Schedule`.
+- `next_retry_at`;
+- the execution log for `Recovery Schedule`.
 
-If `retry_at` is in the future, the backoff is working as designed.
+If `next_retry_at` is in the future, the backoff is working as designed.
 
 ### Old `bt_bot_state` table still exists
 
