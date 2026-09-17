@@ -1,19 +1,51 @@
 # Setup
 
-This guide assumes a local/self-hosted n8n instance and a Telegram bot created through `@BotFather`.
+This guide configures the resilient low-resource MVP in n8n.
 
-## 1. Telegram bot
+## 1. Telegram bot and credential
 
-Create a bot in Telegram and obtain its token.
+Create a bot through `@BotFather` and obtain its token.
 
-The token is used locally in two places:
+In n8n:
 
-- an n8n **Telegram API** credential for outgoing messages/files;
-- the workflow node **Bot Config** for polling through Telegram `getUpdates`.
+1. Open **Credentials**.
+2. Create one **Telegram API** credential.
+3. Paste the BotFather token.
+4. Save it.
 
-The repository contains only the placeholder `PASTE_TELEGRAM_BOT_TOKEN_HERE`. Never commit your real token back to GitHub.
+The token is stored only in the n8n credential. Do not paste it into `Bot Config` and never commit it to GitHub.
 
-## 2. Import the workflow
+## 2. Public HTTPS endpoint
+
+The workflow uses **Telegram Trigger**, not polling. Telegram must be able to reach your n8n webhook through public HTTPS.
+
+For local testing, expose n8n through a suitable HTTPS tunnel/reverse proxy or test on an n8n instance that already has a public HTTPS URL.
+
+Make sure n8n's externally advertised webhook URL is the public HTTPS URL before activating the workflow.
+
+## 3. Create Data Tables
+
+Create exactly:
+
+- `bt_bot_users`
+- `bt_bot_tasks`
+
+Follow [`data-model.md`](data-model.md) exactly.
+
+The old `bt_bot_state` table is not used by this version.
+
+### Migrating an existing local test setup
+
+If you created tables for the old polling workflow:
+
+1. keep `bt_bot_users`;
+2. add the new state/recovery columns to `bt_bot_tasks`;
+3. inspect existing unfinished task rows before assigning their `delivery_step`;
+4. remove `bt_bot_state` after migration.
+
+For easiest MVP testing, starting with an empty `bt_bot_tasks` table is recommended.
+
+## 4. Import workflow
 
 Import:
 
@@ -21,89 +53,30 @@ Import:
 workflows/book-translator-mvp.json
 ```
 
-The workflow uses polling, not Telegram Trigger/webhooks, so localhost is enough. n8n only needs outbound HTTPS access to `api.telegram.org`.
+The exported workflow is intentionally inactive and contains no credential binding.
 
-The polling chain is:
+## 5. Configure administrator
 
-```text
-Schedule Poll (10 sec)
-  -> Bot Config
-  -> Get Poll State
-  -> Telegram getUpdates
-  -> Expand Telegram Update
-  -> Save Poll Offset
-  -> Restore Telegram Update
-  -> Normalize + Config
-```
-
-`Save Poll Offset` runs **before** the business logic. This prevents a slow task flow from causing the same Telegram update to be fetched again on the next schedule tick.
-
-## 3. Configure Bot Config
-
-Open **Bot Config** and replace only these three values:
+Open **Bot Config** and set only the numeric Telegram IDs:
 
 ```js
-const TELEGRAM_BOT_TOKEN = 'PASTE_TELEGRAM_BOT_TOKEN_HERE';
-const ADMIN_USER_ID = '0';
-let ADMIN_CHAT_ID = '0';
-```
-
-Example for a private admin chat:
-
-```js
-const TELEGRAM_BOT_TOKEN = '123456789:YOUR_REAL_TOKEN';
 const ADMIN_USER_ID = '123456789';
-let ADMIN_CHAT_ID = '123456789';
+const ADMIN_CHAT_ID = '123456789';
 ```
 
-For a private chat with the bot, `ADMIN_USER_ID` and `ADMIN_CHAT_ID` normally match.
+For a private conversation with the bot these usually match.
 
-This workflow intentionally does **not** use `$env` or paid n8n Variables.
+Do not add the bot token to this node.
 
-## 4. Telegram credential
+## 6. Assign Telegram credential
 
-In n8n:
+Assign the Telegram API credential to:
 
-1. Open **Credentials**.
-2. Create a **Telegram API** credential.
-3. Paste the same BotFather token.
-4. Save it.
-5. Select this credential on every Telegram action node in the imported workflow.
+- `Telegram Trigger`;
+- all Telegram message/document send nodes in the main path;
+- all Telegram message/document send nodes in the recovery path.
 
-There is no Telegram Trigger.
-
-## 5. Remove an old webhook once
-
-Telegram does not allow `getUpdates` while a webhook is active. If this bot was previously used with Telegram Trigger, remove the webhook once before publishing the polling workflow.
-
-Use:
-
-```text
-https://api.telegram.org/bot<YOUR_TOKEN>/deleteWebhook
-```
-
-A successful response contains `"ok": true`.
-
-## 6. Data Tables
-
-Create exactly three Data Tables:
-
-- `bt_bot_users`
-- `bt_bot_tasks`
-- `bt_bot_state`
-
-Follow [`data-model.md`](data-model.md) for column names and types.
-
-For `bt_bot_state`, add this initial row:
-
-```text
-key               value
-telegram_offset   0
-```
-
-The workflow reads this value before `getUpdates` and immediately writes `update_id + 1` after receiving an update.
-
-The `bt_bot_tasks` table also needs the `telegram_update_id` column. It is a second idempotency guard: the same Telegram upload must not create a second task even if it is accidentally seen again.
+The workflow export intentionally contains no credentials, so this must be done after every fresh import.
 
 ## 7. Add whitelist users
 
@@ -121,34 +94,93 @@ created_at: 2026-09-17T12:00:00.000Z
 
 Authorization uses numeric `user_id`, never username.
 
-## 8. Check Telegram message nodes
+## 8. Activate workflow
 
-The exported workflow intentionally contains no credential binding. After import, select the Telegram API credential on all Telegram action nodes.
+When the Telegram credential and public webhook are configured, activate/publish the workflow.
 
-All **Send Message** nodes have `Append n8n Attribution = false`, so the `This message was sent automatically with n8n` footer should not appear.
-
-Dynamic task texts are prepared in the **Prepare Task Messages** Code node. Telegram message nodes only reference the finished strings, avoiding the expression syntax error previously seen in `Send Admin Task Card`.
-
-## 9. Publish and test
-
-Publish/activate **Book Translator MVP** and send `/start`.
-
-Polling runs every 10 seconds, so the normal response delay is up to about 10 seconds.
-
-Then run the scenarios in [`testing.md`](testing.md).
-
-For one customer book upload, the expected result is strictly:
+The workflow has two entry points:
 
 ```text
-1 Telegram upload
--> 1 tasks row
--> 1 admin task card
--> 1 source book to admin
--> 1 customer confirmation
+Telegram Trigger
 ```
 
-If the same Telegram `update_id` is seen again, `Task Update Not Seen` stops task creation.
+for real incoming bot updates, and:
 
-## Notes on files
+```text
+Recovery Schedule — every 5 minutes
+```
 
-Polling receives Telegram message metadata, including document `file_id`, without downloading the book. The workflow reuses that `file_id` to forward the source/result document through Telegram.
+for unfinished delivery recovery.
+
+There is no 10-second polling job.
+
+## 9. Reliability behavior
+
+Critical Telegram sends use short node-level retry:
+
+```text
+3 tries
+5 seconds between tries
+```
+
+If the problem lasts longer, the task remains in a durable pending state. Recovery checks it later using `delivery_step`, `retry_count` and `retry_at`.
+
+The administrator's translated `file_id` is written to `bt_bot_tasks` before attempting delivery to the customer. This means a temporary network failure does not require the administrator to upload the translated file again.
+
+## 10. Recovery cadence
+
+The scheduled recovery pass runs every 5 minutes but does not blindly retry every task.
+
+It skips:
+
+- `WAITING_RESULT`;
+- `COMPLETE`;
+- `DONE` tasks;
+- tasks whose `retry_at` has not arrived;
+- tasks that exceeded the automatic recovery cap.
+
+A run processes at most a bounded batch, keeping the idle resource footprint small.
+
+## 11. First test
+
+Before using a real book, follow [`testing.md`](testing.md) with a tiny `.txt` or `.pdf` file.
+
+At minimum verify:
+
+1. `/start` for active and unauthorized users;
+2. one source upload produces one task;
+3. admin receives task card and source file;
+4. admin reply with translated file reaches customer;
+5. task ends in `DONE / COMPLETE`;
+6. a simulated Telegram send failure leaves a pending step instead of losing the task/result.
+
+## Troubleshooting
+
+### Telegram Trigger does not receive messages
+
+Check that:
+
+- workflow is active;
+- n8n has a public HTTPS webhook URL;
+- Telegram Trigger has the correct credential;
+- another workflow/bot integration is not currently owning the same bot webhook.
+
+### Telegram action nodes fail but Trigger works
+
+Check that every Telegram send node has the same intended credential assigned.
+
+### Task remains pending after network returns
+
+Check:
+
+- `delivery_step`;
+- `retry_count`;
+- `retry_at`;
+- `last_error`;
+- execution log for `Recovery Schedule`.
+
+If `retry_at` is in the future, the backoff is working as designed.
+
+### Old `bt_bot_state` table still exists
+
+It is harmless if left unused, but the new workflow does not reference it and it can be deleted after migration.
