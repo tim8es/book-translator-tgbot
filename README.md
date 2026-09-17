@@ -4,40 +4,62 @@ Private Telegram bot for accepting book-translation tasks and returning manually
 
 ## What it does
 
-1. n8n polls Telegram every 10 seconds with `getUpdates`.
-2. The next Telegram offset is stored immediately in `bt_bot_state` before the business logic runs.
-3. The bot checks the customer's numeric Telegram `user_id` against the `bt_bot_users` Data Table.
-4. A supported EPUB/PDF/DOCX/TXT upload is deduplicated by `telegram_update_id`.
-5. The bot creates one six-digit task number.
-6. The administrator receives one task card and the source book.
-7. The customer receives one confirmation with the current time estimate: up to 15 minutes per 10,000 characters.
-8. The administrator replies to the task card with the translated file.
-9. The bot sends it to the original customer and marks the task `DONE`.
+1. Telegram Trigger starts the workflow only when a real Telegram update arrives.
+2. The bot checks the sender's numeric Telegram `user_id` against `bt_bot_users`.
+3. A supported EPUB/PDF/DOCX/TXT upload creates one six-digit task in `bt_bot_tasks`.
+4. The task persists its current delivery step so a network failure does not lose progress.
+5. The administrator receives a task card and source book.
+6. The customer receives a confirmation with the task number and current time estimate.
+7. The administrator replies to the task card with the translated file.
+8. The translated Telegram `file_id` is saved before customer delivery.
+9. If delivery fails, the task remains `RESULT_PENDING` and a recovery pass retries later.
+10. After successful customer delivery, the task becomes `DONE` / `COMPLETE`.
 
 The MVP does **not** automatically translate books and does **not** process payments.
 
-## Why polling
+## Reliability model
 
-The workflow does not use Telegram Trigger/webhooks, so a local n8n instance does not need a public HTTPS URL, domain, ngrok, or Cloudflare Tunnel.
+The workflow is deliberately lightweight:
+
+- no Redis;
+- no RabbitMQ;
+- no external queue;
+- no external object storage;
+- Telegram files are referenced by `file_id` rather than copied into n8n storage;
+- critical Telegram operations use short built-in retries;
+- one recovery schedule runs every 5 minutes and only touches unfinished tasks whose retry time has arrived.
+
+The task row itself is the state machine and recovery source of truth.
 
 ```text
-Schedule Poll
-  -> Bot Config
-  -> Get Poll State
-  -> Telegram getUpdates
-  -> Expand Telegram Update
-  -> Save Poll Offset
-  -> Restore Telegram Update
-  -> Normalize + Config
+ADMIN_CARD_PENDING
+      ↓
+SOURCE_PENDING
+      ↓
+CUSTOMER_CONFIRM_PENDING
+      ↓
+WAITING_RESULT
+      ↓
+RESULT_PENDING
+      ↓
+COMPLETE
 ```
 
-The offset is persisted to the `bt_bot_state` Data Table before customer/admin processing. `bt_bot_tasks.telegram_update_id` provides an additional task-level duplicate guard.
+Short network failures are handled by node-level retry. Longer outages leave the task in its current pending step and recovery continues later.
+
+## Runtime cost
+
+The old polling version started the main workflow every 10 seconds even when idle (~8,640 executions/day).
+
+The current version starts the main workflow only for Telegram updates. When idle, the only periodic work is the 5-minute recovery schedule (~288 lightweight executions/day).
 
 ## Quick start
 
-### 1. Create a Telegram bot and credential
+### 1. Create Telegram credential
 
-Create a bot with `@BotFather`, then create an n8n **Telegram API** credential using that token.
+Create the bot with `@BotFather`, then create one n8n **Telegram API** credential using that token.
+
+The workflow export contains no real token and no credential binding.
 
 ### 2. Create Data Tables
 
@@ -45,16 +67,10 @@ Create exactly:
 
 - `bt_bot_users`
 - `bt_bot_tasks`
-- `bt_bot_state`
 
-The workflow references these exact table names; no unprefixed `users`, `tasks`, or `bot_state` tables are expected.
+`bt_bot_state` is no longer used.
 
-Use [`docs/data-model.md`](docs/data-model.md). Add this initial `bt_bot_state` row:
-
-```text
-key               value
-telegram_offset   0
-```
+Use [`docs/data-model.md`](docs/data-model.md) for the exact schema.
 
 ### 3. Import the workflow
 
@@ -64,37 +80,29 @@ Import:
 workflows/book-translator-mvp.json
 ```
 
-The export contains no real token, personal admin ID, or credential binding.
+### 4. Configure admin IDs
 
-### 4. Configure one node
-
-Open **Bot Config** and replace:
+Open **Bot Config** and set:
 
 ```js
-const TELEGRAM_BOT_TOKEN = 'PASTE_TELEGRAM_BOT_TOKEN_HERE';
-const ADMIN_USER_ID = '0';
-let ADMIN_CHAT_ID = '0';
+const ADMIN_USER_ID = '123456789';
+const ADMIN_CHAT_ID = '123456789';
 ```
 
-with your local values.
-
-The workflow intentionally does **not** depend on `$env` or paid n8n Variables.
+For a private admin chat these normally match.
 
 ### 5. Assign Telegram credential
 
-Select the Telegram API credential on every Telegram action node.
+Select the same Telegram API credential on:
 
-All Send Message nodes have `Append n8n Attribution = false`.
+- Telegram Trigger;
+- every Telegram Send Message / Send Document node.
 
-### 6. Remove an old webhook once
+### 6. Provide public HTTPS access
 
-If the same bot was previously used with Telegram Trigger, call once:
+Telegram Trigger uses a webhook. Your n8n instance must be reachable from Telegram through public HTTPS.
 
-```text
-https://api.telegram.org/bot<YOUR_TOKEN>/deleteWebhook
-```
-
-Then publish the polling workflow.
+For local development use a supported tunnel/reverse proxy or test on a hosted/self-hosted n8n instance with a public HTTPS URL.
 
 ### 7. Add whitelist customers
 
@@ -102,21 +110,32 @@ Add a row to `bt_bot_users` with numeric `user_id` and `status = ACTIVE`.
 
 ## Expected upload behavior
 
-For one customer book upload:
+For one customer upload:
 
 ```text
 1 Telegram update
--> 1 tasks row
--> 1 admin task card
--> 1 source file to admin
--> 1 customer confirmation
+→ 1 task row
+→ 1 admin task card
+→ 1 source file to admin
+→ 1 customer confirmation
 ```
 
-If the same Telegram update is encountered again, `Task Update Not Seen` prevents a second task.
+A failure after task creation does not require the customer to resend the book: the task row keeps the pending delivery step for recovery.
 
-## Message construction
+## Result delivery safety
 
-Complex dynamic task texts are built in **Prepare Task Messages**. Telegram nodes reference simple finished fields such as `admin_task_text`. This avoids the expression syntax error previously seen in `Send Admin Task Card`.
+When the administrator uploads the translated document:
+
+```text
+admin file received
+→ save translated_file_id
+→ status = DELIVERY_PENDING
+→ delivery_step = RESULT_PENDING
+→ send to customer
+→ success: DONE / COMPLETE
+```
+
+Therefore a network failure during customer delivery does not lose the translated file reference.
 
 ## Validation
 
@@ -124,16 +143,15 @@ Complex dynamic task texts are built in **Prepare Task Messages**. Telegram node
 npm test
 ```
 
-The validator checks:
+The validator checks, among other things:
 
-- no Telegram Trigger/webhook dependency;
-- compatible Schedule Trigger version;
-- `bt_bot_state` offset persistence before business logic;
-- `telegram_update_id` deduplication;
-- the three Data Table references;
-- disabled n8n attribution on Send Message nodes;
-- no `$env` dependency;
-- no embedded real Telegram token;
-- critical task state transitions.
+- Telegram Trigger is present;
+- the old 10-second polling path is absent;
+- recovery schedule exists and runs every 5 minutes;
+- critical Telegram nodes use retry;
+- `translated_file_id` is persisted before result delivery;
+- the task state machine contains pending delivery steps;
+- recovery selects pending tasks and applies bounded retry/backoff;
+- workflow contains no real Telegram token or credential binding.
 
-See [`docs/setup.md`](docs/setup.md) for setup and [`docs/testing.md`](docs/testing.md) for the smoke-test matrix.
+See [`docs/setup.md`](docs/setup.md) and [`docs/testing.md`](docs/testing.md) before the first real test.
