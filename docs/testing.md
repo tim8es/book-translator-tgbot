@@ -8,7 +8,7 @@ Run `npm test` first, then test the imported workflow against your n8n instance 
 - n8n has a public HTTPS webhook URL;
 - Telegram Trigger uses the intended Telegram API credential;
 - all Telegram action nodes use the intended Telegram API credential;
-- **Bot Config** contains the local `ADMIN_USER_ID` and `ADMIN_CHAT_ID`;
+- **Admin Config** contains the local `ADMIN_USER_ID` and `ADMIN_CHAT_ID`;
 - `bt_bot_users` and `bt_bot_tasks` exist with the schema from `docs/data-model.md`;
 - one active test customer exists;
 - one small supported source file is available;
@@ -64,10 +64,11 @@ Expected in `bt_bot_tasks`:
 - `telegram_update_id` is populated;
 - `task_no` is six digits;
 - `source_file_id` and `source_filename` are populated;
-- `admin_task_text`, `source_caption` and `customer_confirmation_text` are persisted;
+- `admin_chat_id`, `admin_task_text`, `source_caption` and `customer_confirmation_text` are persisted;
 - `retry_count = 0` initially;
 - after the full notification flow succeeds, `status = PROCESSING`;
 - after the full notification flow succeeds, `delivery_step = WAITING_RESULT`;
+- `next_retry_at` is empty/null while waiting for manual translation;
 - `admin_task_message_id` is populated.
 
 Expected customer result:
@@ -124,6 +125,7 @@ Expected transition before customer delivery:
 translated_file_id = Telegram file_id from admin upload
 status = DELIVERY_PENDING
 delivery_step = RESULT_PENDING
+next_retry_at is populated
 ```
 
 Expected after successful customer delivery:
@@ -133,6 +135,7 @@ Expected after successful customer delivery:
 - `status = DONE`;
 - `delivery_step = COMPLETE`;
 - `completed_at` is populated;
+- `next_retry_at` is empty/null;
 - admin receives one completion confirmation.
 
 ## T09 — duplicate completion protection
@@ -176,8 +179,6 @@ Expected:
 
 ## T13 — admin card delivery outage
 
-Test on a disposable task or controlled environment.
-
 1. Make Telegram outbound delivery unavailable after the task row has been inserted but before the admin card succeeds.
 2. Keep the outage longer than the short node retry window.
 3. Restore connectivity.
@@ -193,7 +194,7 @@ Expected after a due recovery pass:
 
 - admin card is delivered;
 - `admin_task_message_id` is saved;
-- workflow proceeds to the next pending step rather than creating a new task.
+- workflow proceeds to `SOURCE_PENDING` rather than creating a new task.
 
 ## T14 — source delivery outage
 
@@ -229,25 +230,24 @@ After recovery:
 
 ## T16 — result delivery outage — critical acceptance test
 
-This is the most important reliability test.
-
 1. Complete a task normally up to `PROCESSING / WAITING_RESULT`.
 2. Make outbound Telegram delivery unavailable.
 3. Reply to the task card with a translated document.
 4. Let the immediate Telegram retries fail.
 
-Expected **before connectivity is restored**:
+Expected before connectivity is restored:
 
 ```text
 translated_file_id is populated
 status = DELIVERY_PENDING
 delivery_step = RESULT_PENDING
+next_retry_at is populated
 ```
 
 The translated `file_id` must remain stored even though the customer has not received the file.
 
 5. Restore connectivity.
-6. Wait until the task is eligible for recovery.
+6. Wait until `next_retry_at` is due and a recovery run occurs.
 
 Expected:
 
@@ -273,9 +273,10 @@ Force a pending delivery to fail across multiple recovery runs.
 Expected:
 
 - `retry_count` increases;
-- `retry_at` moves forward using increasing backoff;
-- recovery does not retry the same task on every 5-minute tick when `retry_at` is still in the future;
-- automatic retries eventually stop at the configured cap instead of spinning forever.
+- `next_retry_at` moves forward using increasing backoff;
+- recovery does not retry the same task on every 5-minute tick while `next_retry_at` is still in the future;
+- no more than 20 due tasks are selected in one recovery run;
+- automatic retries stop after the configured cap of 8 attempts.
 
 ## T19 — idle resource behavior
 
