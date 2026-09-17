@@ -11,6 +11,8 @@ The main workflow is event-driven:
 ```text
 Telegram Trigger
       ↓
+Admin Config
+      ↓
 Normalize + Config
       ↓
 Role Switch
@@ -18,9 +20,7 @@ Role Switch
 admin    customer
 ```
 
-There is no 10-second polling loop and no `bt_bot_state.telegram_offset` state.
-
-The Telegram Trigger requires a public HTTPS webhook endpoint for n8n.
+There is no 10-second polling loop and no `bt_bot_state.telegram_offset` state. Telegram Trigger requires a public HTTPS webhook endpoint for n8n.
 
 ## Lightweight reliability model
 
@@ -32,8 +32,7 @@ Each task tracks:
 status
 delivery_step
 retry_count
-retry_at
-last_error
+next_retry_at
 ```
 
 Delivery steps:
@@ -52,7 +51,7 @@ RESULT_PENDING
 COMPLETE
 ```
 
-The current step means: **this is the next durable operation that still needs to finish**.
+The current step means: this is the next durable operation that still needs to finish.
 
 A critical Telegram send has two recovery layers:
 
@@ -63,9 +62,9 @@ A critical Telegram send has two recovery layers:
 
 `Recovery Schedule` runs every 5 minutes.
 
-It reads unfinished task rows, selects only rows whose `retry_at` is due, and processes a bounded batch (maximum 20 tasks per run).
+It reads only tasks in pending delivery steps. `Select Due Recoveries` then filters by `next_retry_at`, caps automatic recovery at 8 attempts, and selects at most 20 tasks per run.
 
-Backoff is intentionally slow to avoid wasting resources during long outages:
+Backoff:
 
 ```text
 5 min
@@ -78,12 +77,14 @@ Backoff is intentionally slow to avoid wasting resources during long outages:
 24 h
 ```
 
-Automatic recovery is bounded. After the configured maximum retry count the task remains visible with its last error instead of spinning indefinitely.
+Tasks in `WAITING_RESULT` and `COMPLETE` are not recovery work.
 
 ## Customer flow
 
 ```text
 Telegram Trigger
+     ↓
+Admin Config
      ↓
 Normalize + Config
      ↓
@@ -106,7 +107,7 @@ deny      input routing
                ↓
         send admin card
                ↓
- persist admin message id
+ save admin_task_message_id
  delivery_step=SOURCE_PENDING
                ↓
         send source file
@@ -118,8 +119,6 @@ deny      input routing
  status=PROCESSING
  delivery_step=WAITING_RESULT
 ```
-
-If a Telegram operation fails permanently for that execution, the persisted step remains recoverable.
 
 ## Administrator completion flow
 
@@ -133,6 +132,7 @@ find task
 persist translated_file_id FIRST
 status=DELIVERY_PENDING
 delivery_step=RESULT_PENDING
+next_retry_at set
                ↓
 send translated file to customer
                ↓
@@ -166,7 +166,7 @@ message.from.id → bt_bot_users.user_id
 
 Access requires `status = ACTIVE`. Username is metadata only.
 
-Administrator authorization uses the numeric `ADMIN_USER_ID` configured locally in **Bot Config**.
+Administrator authorization uses numeric `ADMIN_USER_ID` and `ADMIN_CHAT_ID` configured locally in **Admin Config**.
 
 ## Task IDs
 
