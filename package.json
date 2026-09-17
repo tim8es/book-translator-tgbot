@@ -1,0 +1,13 @@
+{
+  "name": "book-translator-tgbot",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Private Telegram book-translation task bot powered by n8n",
+  "scripts": {
+    "test": "node scripts/validate-workflow.mjs",
+    "validate": "node scripts/validate-workflow.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
