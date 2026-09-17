@@ -1,3 +1,3 @@
-task_no,telegram_update_id,user_id,customer_chat_id,username,source_file_id,source_filename,translated_file_id,status,admin_task_message_id,created_at,completed_at
-482731,123456700,111111111,111111111,example_user,EXAMPLE_SOURCE_FILE_ID,book.epub,,PROCESSING,9001,2026-09-17T12:10:00.000Z,
-583204,123456701,111111111,111111111,example_user,EXAMPLE_SOURCE_FILE_ID_2,book2.pdf,EXAMPLE_TRANSLATED_FILE_ID,DONE,9002,2026-09-17T12:20:00.000Z,2026-09-17T13:45:00.000Z
+task_no,telegram_update_id,user_id,customer_chat_id,username,source_file_id,source_filename,translated_file_id,status,delivery_step,admin_task_message_id,admin_task_text,source_caption,customer_confirmation_text,retry_count,retry_at,last_error,created_at,completed_at
+482731,123456700,111111111,111111111,example_user,EXAMPLE_SOURCE_FILE_ID,book.epub,,PROCESSING,WAITING_RESULT,9001,"Новая задача #482731","Задача #482731 — исходный файл","Задача #482731 принята.",0,,,2026-09-17T12:10:00.000Z,
+583204,123456701,111111111,111111111,example_user,EXAMPLE_SOURCE_FILE_ID_2,book2.pdf,EXAMPLE_TRANSLATED_FILE_ID,DONE,COMPLETE,9002,"Новая задача #583204","Задача #583204 — исходный файл","Задача #583204 принята.",0,,,2026-09-17T12:20:00.000Z,2026-09-17T13:45:00.000Z
