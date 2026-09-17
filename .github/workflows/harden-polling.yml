@@ -6,6 +6,7 @@ on:
       - feat/mvp
     paths:
       - scripts/harden-polling.mjs
+      - scripts/run-hardening.trigger
 
 permissions:
   contents: write
