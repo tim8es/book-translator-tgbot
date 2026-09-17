@@ -4,7 +4,7 @@ Private Telegram bot for accepting book-translation tasks and returning manually
 
 ## What the MVP does
 
-1. A user opens the bot.
+1. n8n polls Telegram for one new message every 5 seconds.
 2. The bot checks the user's numeric Telegram `user_id` against the `users` n8n Data Table.
 3. Only rows with `status = ACTIVE` get access.
 4. The user sends an EPUB, PDF, DOCX or TXT file.
@@ -22,9 +22,10 @@ The MVP does **not** automatically translate books and does **not** process paym
 Customer Telegram
        |
        v
- Telegram Bot
+Telegram Bot API
+       ^
+       | getUpdates every 5 sec
        |
-       v
       n8n
    /        \
 users      tasks
@@ -40,6 +41,8 @@ translated file
 Customer Telegram
 ```
 
+Incoming messages use Telegram polling, so a local n8n instance does **not** need a public HTTPS URL, domain, ngrok or Cloudflare Tunnel.
+
 Source and translated books are reused through Telegram `file_id` values. The workflow does not download source books merely to forward them.
 
 ## Quick start
@@ -52,7 +55,7 @@ Do not commit the token to this repository.
 
 ### 2. Create the n8n Telegram credential
 
-In n8n create a **Telegram API** credential using the bot token.
+In n8n create a **Telegram API** credential using the bot token. The outgoing Telegram nodes use this credential.
 
 ### 3. Create the Data Tables
 
@@ -63,18 +66,26 @@ Create two n8n Data Tables named exactly:
 
 Use the schemas in [`docs/data-model.md`](docs/data-model.md).
 
-### 4. Configure the administrator
+### 4. Configure local n8n
 
-Preferred method: expose these environment variables to the n8n process:
+Expose the bot token to the n8n process for polling:
+
+```bash
+TELEGRAM_BOT_TOKEN=123456789:YOUR_BOT_TOKEN
+```
+
+Also configure the administrator:
 
 ```bash
 ADMIN_USER_ID=123456789
 ADMIN_CHAT_ID=123456789
 ```
 
-For a private admin chat, both values normally equal the administrator's Telegram user ID.
+For a private admin chat, `ADMIN_USER_ID` and `ADMIN_CHAT_ID` normally match.
 
-If environment-variable access is disabled in your n8n instance, open the workflow node **Normalize + Config** and replace:
+`TELEGRAM_BOT_TOKEN` must be available through `$env` because the polling HTTP nodes call Telegram's Bot API directly. If your n8n security policy blocks environment access in nodes, allow environment-variable access for this workflow.
+
+For the two admin IDs only, there is also a fallback: open **Normalize + Config** and replace:
 
 ```js
 const FALLBACK_ADMIN_USER_ID = '0';
@@ -91,7 +102,20 @@ Import:
 workflows/book-translator-mvp.json
 ```
 
-The exported workflow intentionally contains no Telegram credential binding. After import, assign the Telegram credential created in step 2 to the **Telegram Trigger** and all **Telegram** nodes.
+The exported workflow intentionally contains no credential binding. After import, assign the Telegram credential created in step 2 to all **Telegram** action nodes.
+
+The workflow starts with:
+
+```text
+Schedule Poll
+  -> Prepare Poll State
+  -> Webhook Setup Switch
+  -> Telegram getUpdates
+  -> Expand Telegram Update
+  -> Normalize + Config
+```
+
+On the first successful polling run it automatically calls Telegram `deleteWebhook`, then stores that setup state. After that it uses `getUpdates` only. The last processed Telegram `update_id` is stored in n8n workflow static data so the same update is not intentionally processed again.
 
 ### 6. Add a user to the whitelist
 
@@ -108,9 +132,11 @@ Authorization uses only `user_id`. `username` is metadata and may change.
 
 An unauthorized user receives their numeric Telegram ID in the rejection message, making it easy to send that ID to the administrator for manual whitelisting.
 
-### 7. Activate and test
+### 7. Publish and test
 
-Activate the workflow and run the manual smoke test from [`docs/testing.md`](docs/testing.md).
+Publish/activate the workflow and run the manual smoke test from [`docs/testing.md`](docs/testing.md).
+
+No public webhook URL is required. While the workflow is active, new Telegram messages are normally picked up within about 5 seconds.
 
 ## Local validation
 
@@ -120,7 +146,7 @@ The repository includes a dependency-free static validator for the workflow JSON
 npm test
 ```
 
-It checks the required routing nodes, table references, six-digit task-number generator, write schemas, secret leakage and critical state transitions.
+It checks the polling entrypoint, Telegram token handling, table references, six-digit task-number generator, write schemas, secret leakage and critical state transitions.
 
 This does **not** replace an actual run against your n8n instance and Telegram bot.
 
@@ -158,6 +184,8 @@ A task becomes `PROCESSING` only after the admin task card is successfully sent 
 ## MVP limitations
 
 - one administrator identity;
+- polling latency up to roughly 5 seconds;
+- polling offset is stored in n8n workflow static data;
 - manual translation outside n8n;
 - no payment flow;
 - no cancellation UI;
