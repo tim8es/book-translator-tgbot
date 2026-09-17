@@ -8,7 +8,13 @@ const errors = [];
 const nodes = workflow.nodes ?? [];
 const byName = new Map(nodes.map((node) => [node.name, node]));
 const requiredNodes = [
-  'Telegram Trigger',
+  'Schedule Poll',
+  'Prepare Poll State',
+  'Webhook Setup Switch',
+  'Delete Telegram Webhook',
+  'Mark Webhook Deleted',
+  'Telegram getUpdates',
+  'Expand Telegram Update',
   'Normalize + Config',
   'Role Switch',
   'Whitelist ACTIVE',
@@ -35,12 +41,45 @@ for (const name of requiredNodes) {
   if (!byName.has(name)) errors.push(`Missing node: ${name}`);
 }
 
-const triggers = nodes.filter((node) => node.type === 'n8n-nodes-base.telegramTrigger');
-if (triggers.length !== 1) errors.push(`Expected one Telegram Trigger, found ${triggers.length}`);
-if (triggers[0]?.parameters?.additionalFields?.download !== false) {
-  errors.push('Telegram Trigger must not download source files');
+const telegramTriggers = nodes.filter((node) => node.type === 'n8n-nodes-base.telegramTrigger');
+if (telegramTriggers.length !== 0) errors.push('Polling workflow must not contain Telegram Trigger');
+
+const scheduleTriggers = nodes.filter((node) => node.type === 'n8n-nodes-base.scheduleTrigger');
+if (scheduleTriggers.length !== 1) errors.push(`Expected one Schedule Trigger, found ${scheduleTriggers.length}`);
+const scheduleInterval = scheduleTriggers[0]?.parameters?.rule?.interval?.[0] ?? {};
+if (scheduleInterval.field !== 'seconds' || scheduleInterval.secondsInterval !== 5) {
+  errors.push('Schedule Poll must run every 5 seconds');
 }
 if (workflow.active !== false) errors.push('Exported workflow must be inactive');
+
+const preparePollCode = byName.get('Prepare Poll State')?.parameters?.jsCode ?? '';
+if (!preparePollCode.includes("$getWorkflowStaticData('global')") || !preparePollCode.includes('telegram_offset')) {
+  errors.push('Prepare Poll State must read persistent telegram_offset');
+}
+
+const getUpdates = byName.get('Telegram getUpdates');
+const getUpdatesUrl = getUpdates?.parameters?.url ?? '';
+if (!getUpdatesUrl.includes('$env.TELEGRAM_BOT_TOKEN') || !getUpdatesUrl.includes('/getUpdates')) {
+  errors.push('Telegram getUpdates must use TELEGRAM_BOT_TOKEN from environment');
+}
+const pollQuery = getUpdates?.parameters?.queryParameters?.parameters ?? [];
+if (!pollQuery.some((p) => p.name === 'limit' && String(p.value) === '1')) {
+  errors.push('Telegram getUpdates must request one update per execution');
+}
+if (!pollQuery.some((p) => p.name === 'offset')) {
+  errors.push('Telegram getUpdates must send offset');
+}
+
+const deleteWebhook = byName.get('Delete Telegram Webhook');
+const deleteWebhookUrl = deleteWebhook?.parameters?.url ?? '';
+if (!deleteWebhookUrl.includes('$env.TELEGRAM_BOT_TOKEN') || !deleteWebhookUrl.includes('/deleteWebhook')) {
+  errors.push('Delete Telegram Webhook must use TELEGRAM_BOT_TOKEN from environment');
+}
+
+const expandCode = byName.get('Expand Telegram Update')?.parameters?.jsCode ?? '';
+for (const expected of ["$getWorkflowStaticData('global')", 'update_id', 'telegram_offset']) {
+  if (!expandCode.includes(expected)) errors.push(`Expand Telegram Update missing ${expected}`);
+}
 
 const normalizeCode = byName.get('Normalize + Config')?.parameters?.jsCode ?? '';
 for (const expected of ['$env.ADMIN_USER_ID', '$env.ADMIN_CHAT_ID', 'FALLBACK_ADMIN_USER_ID', 'FALLBACK_ADMIN_CHAT_ID']) {
@@ -86,6 +125,15 @@ if (!whitelistFilters.some((f) => f.keyName === 'user_id') ||
 
 const connections = workflow.connections ?? {};
 const firstTarget = (name, output = 0) => connections[name]?.main?.[output]?.[0]?.node;
+if (firstTarget('Schedule Poll') !== 'Prepare Poll State') {
+  errors.push('Schedule Poll must feed Prepare Poll State');
+}
+if (firstTarget('Telegram getUpdates') !== 'Expand Telegram Update') {
+  errors.push('Telegram getUpdates must feed Expand Telegram Update');
+}
+if (firstTarget('Expand Telegram Update') !== 'Normalize + Config') {
+  errors.push('Expand Telegram Update must feed Normalize + Config');
+}
 if (firstTarget('Send Admin Task Card') !== 'Mark Task Processing') {
   errors.push('Task must enter PROCESSING only after admin card is sent');
 }
