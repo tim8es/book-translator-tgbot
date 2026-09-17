@@ -1,20 +1,18 @@
 # Data model
 
-MVP uses two n8n Data Tables named exactly `users` and `tasks`.
+MVP uses three n8n Data Tables named exactly `users`, `tasks`, and `bot_state`.
 
 > n8n automatically adds its own `id`, `createdAt`, and `updatedAt` system columns. Do not create those columns manually.
 
 ## `users`
 
-Create these columns in this order:
-
-| Column | n8n type | Required by workflow | Notes |
+| Column | n8n type | Required | Notes |
 | --- | --- | --- | --- |
-| `user_id` | String | yes | Numeric Telegram user ID stored as a string. Authorization key. Keep values unique. |
-| `username` | String | no | Telegram username without `@`; metadata only. Never used for authorization. |
-| `name` | String | no | Human-readable name for the administrator. |
-| `status` | String | yes | `ACTIVE` or `BLOCKED`. Only `ACTIVE` grants access. |
-| `created_at` | Date | yes | When the whitelist record was added. |
+| `user_id` | String | yes | Numeric Telegram user ID stored as a string. Authorization key. |
+| `username` | String | no | Metadata only; never used for authorization. |
+| `name` | String | no | Human-readable name. |
+| `status` | String | yes | `ACTIVE` or `BLOCKED`. |
+| `created_at` | Date | yes | Whitelist creation time. |
 
 Example:
 
@@ -26,57 +24,76 @@ status     ACTIVE
 created_at 2026-09-17T12:00:00.000Z
 ```
 
-The workflow checks both `user_id` and `status = ACTIVE` on every customer update. Changing the row to `BLOCKED` therefore takes effect on the next message.
-
 ## `tasks`
 
-Create these columns in this order:
-
-| Column | n8n type | Required by workflow | Notes |
+| Column | n8n type | Required | Notes |
 | --- | --- | --- | --- |
-| `task_no` | Number | yes | Public six-digit task number, `100000`–`999999`. Must be unique. |
+| `task_no` | Number | yes | Public six-digit task number, `100000`–`999999`. |
+| `telegram_update_id` | Number | yes | Telegram update that created this task. Used for idempotency/deduplication. |
 | `user_id` | String | yes | Telegram user ID snapshot. |
 | `customer_chat_id` | String | yes | Chat where the result must be returned. |
 | `username` | String | no | Telegram username snapshot. |
 | `source_file_id` | String | yes | Telegram `file_id` of the source document. |
 | `source_filename` | String | yes | Original filename. |
-| `translated_file_id` | String | no | Telegram `file_id` supplied by the administrator on completion. |
+| `translated_file_id` | String | no | Telegram `file_id` supplied by the administrator. |
 | `status` | String | yes | `NEW`, `PROCESSING`, `DONE`, or `REJECTED`. |
-| `admin_task_message_id` | Number | no initially | Message ID of the administrator task card. Used to map replies. |
+| `admin_task_message_id` | Number | no initially | Message ID of the administrator task card. |
 | `created_at` | Date | yes | Task creation time. |
 | `completed_at` | Date | no | Set after successful result delivery. |
+
+`telegram_update_id` is checked before task creation. If the same Telegram update is accidentally fetched again, `Task Update Not Seen` produces no output and no second task is created.
 
 ### State transitions
 
 ```text
 NEW → PROCESSING → DONE
-  └──────────────→ REJECTED   (reserved for later/manual use)
+  └──────────────→ REJECTED
 ```
 
-The imported workflow creates `NEW`, changes to `PROCESSING` after the administrator card is sent and its message ID is persisted, and changes to `DONE` only after Telegram successfully sends the translated document to the customer.
+A task changes to `PROCESSING` only after the administrator task card has been sent and its `message_id` is saved. It changes to `DONE` only after the translated document is sent to the customer.
 
 ### Task number allocation
 
-For each valid source file the workflow generates a batch of random six-digit candidates in `100000`–`999999`, removes candidates already present in `tasks`, and selects the first unused one. This is a simple collision-safe allocator for the low-volume private MVP. It prevents reuse of an existing number without requiring a separate database sequence.
+For each valid source file the workflow generates random six-digit candidates in `100000`–`999999`, filters out numbers already present in `tasks`, and selects the first unused one.
 
 ### Admin reply mapping
 
-The administrator must reply to the bot message containing the task card. Telegram then includes `reply_to_message.message_id`; the workflow looks up:
+The administrator replies with the translated file to the task-card message. The workflow resolves:
 
 ```text
 tasks.admin_task_message_id = reply_to_message.message_id
 ```
 
-A result is delivered only if exactly one matching task is found and its status is not `DONE`.
+## `bot_state`
+
+Create exactly these columns:
+
+| Column | n8n type | Required | Notes |
+| --- | --- | --- | --- |
+| `key` | String | yes | State key. |
+| `value` | Number | yes | Numeric state value. |
+
+Add one initial row:
+
+```text
+key               value
+telegram_offset   0
+```
+
+The polling path reads `telegram_offset`, calls Telegram `getUpdates`, then immediately writes:
+
+```text
+telegram_offset = update_id + 1
+```
+
+This write happens before whitelist/task/message processing, so the next polling execution advances past the update even if the rest of the workflow takes longer.
 
 ## Creating the tables
 
-In n8n:
+1. Create `users` with the columns above.
+2. Create `tasks` with the columns above, including `telegram_update_id`.
+3. Create `bot_state` with `key` and `value`.
+4. Add `telegram_offset / 0` to `bot_state`.
+5. Add at least one test customer to `users` with `status = ACTIVE`.
 
-1. Open **Data tables**.
-2. Create a table named exactly `users` and add the columns above.
-3. Create a table named exactly `tasks` and add the columns above.
-4. Add at least one `users` row with your test customer's numeric Telegram ID and `status = ACTIVE`.
-5. Do not add the administrator to `users` unless the same account also needs to act as a customer; admin routing is configured separately in the workflow.
-
-`examples/users.csv` and `examples/tasks.csv` show the expected column layout. All IDs in those files are fake examples.
+`examples/users.csv`, `examples/tasks.csv`, and `examples/bot_state.csv` show the expected layouts. All IDs are fake examples.
