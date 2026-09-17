@@ -82,11 +82,11 @@ workflows/book-translator-mvp.json
 
 ### 4. Configure admin IDs
 
-Open **Bot Config** and set:
+Open **Admin Config** and set:
 
 ```js
-const ADMIN_USER_ID = '123456789';
-const ADMIN_CHAT_ID = '123456789';
+let ADMIN_USER_ID = '123456789';
+let ADMIN_CHAT_ID = '123456789';
 ```
 
 For a private admin chat these normally match.
