@@ -1,141 +1,124 @@
 # Data model
 
-MVP uses **two** n8n Data Tables:
+The MVP uses three n8n Data Tables:
 
 - `bt_bot_users`
 - `bt_bot_tasks`
+- `bt_bot_state`
 
-`bt_bot_state` from the polling version is obsolete and should be deleted after migration.
+n8n adds its own system `id`, `createdAt`, and `updatedAt` columns; do not create them manually.
 
-> n8n automatically adds its own `id`, `createdAt`, and `updatedAt` system columns. Do not create those manually.
+## `bt_bot_state`
+
+| Column | Type | Required | Notes |
+| --- | --- | --- | --- |
+| `key` | String | yes | State key. |
+| `value` | Number | yes | Numeric state value. |
+
+Create exactly one initial row:
+
+```text
+key = telegram_offset
+value = 0
+```
+
+`telegram_offset` is the next Telegram update ID that polling may request. It is advanced only after the current update reaches a safe checkpoint.
 
 ## `bt_bot_users`
 
-| Column | n8n type | Required | Notes |
+| Column | Type | Required | Notes |
 | --- | --- | --- | --- |
-| `user_id` | String | yes | Numeric Telegram user ID stored as a string. Authorization key. |
-| `username` | String | no | Metadata only; never used for authorization. |
+| `user_id` | String | yes | Numeric Telegram user ID; authorization key. |
+| `username` | String | no | Metadata only. |
 | `name` | String | no | Human-readable name. |
 | `status` | String | yes | `ACTIVE` or `BLOCKED`. |
 | `created_at` | Date | yes | Whitelist creation time. |
 
 ## `bt_bot_tasks`
 
-| Column | n8n type | Required | Notes |
+| Column | Type | Required | Notes |
 | --- | --- | --- | --- |
-| `task_no` | Number | yes | Public six-digit task number, `100000`–`999999`. |
-| `telegram_update_id` | Number | yes | Telegram update that created the task. Duplicate guard. |
-| `user_id` | String | yes | Customer Telegram user ID snapshot. |
-| `customer_chat_id` | String | yes | Chat where the result must be returned. |
-| `username` | String | no | Telegram username snapshot. |
+| `task_no` | Number | yes | Six-digit public task number. |
+| `telegram_update_id` | Number | yes | Customer update that created the task; duplicate guard. |
+| `user_id` | String | yes | Customer Telegram ID. |
+| `customer_chat_id` | String | yes | Destination chat for result. |
+| `username` | String | no | Customer username snapshot. |
 | `source_file_id` | String | yes | Telegram `file_id` of source book. |
 | `source_filename` | String | yes | Original filename. |
-| `translated_file_id` | String | no | Telegram `file_id` uploaded by admin; persisted before delivery. |
+| `translated_file_id` | String | no | Admin result `file_id`; persisted before delivery. |
 | `status` | String | yes | `NEW`, `PROCESSING`, `DELIVERY_PENDING`, `DONE`, `REJECTED`. |
-| `admin_chat_id` | String | yes | Admin chat snapshot used by delivery and recovery. |
-| `admin_task_message_id` | Number | no initially | Admin task-card message ID used to map completion replies. |
-| `admin_task_text` | String | yes | Persisted task-card text for recovery. |
-| `source_caption` | String | yes | Persisted source-file caption for recovery. |
-| `customer_confirmation_text` | String | yes | Persisted customer confirmation for recovery. |
-| `delivery_step` | String | yes | Durable next-step state; values below. |
-| `retry_count` | Number | yes | Number of persistent recovery attempts; starts at `0`. |
-| `next_retry_at` | Date | no | Earliest time recovery may retry this task; null while waiting for manual translation or after completion. |
+| `admin_chat_id` | String | yes | Admin chat used for delivery/recovery. |
+| `admin_task_message_id` | Number | no | Task-card message ID used to map admin replies. |
+| `admin_task_text` | String | yes | Persisted task-card text. |
+| `source_caption` | String | yes | Persisted source caption. |
+| `customer_confirmation_text` | String | yes | Persisted customer confirmation. |
+| `delivery_step` | String | yes | Durable delivery state. |
+| `retry_count` | Number | yes | Persistent recovery-attempt count. |
+| `next_retry_at` | Date | no | Earliest next recovery time. |
 | `created_at` | Date | yes | Task creation time. |
-| `completed_at` | Date | no | Successful result delivery time. |
+| `completed_at` | Date | no | Successful customer-delivery time. |
 
-### `delivery_step`
+## Delivery state machine
 
-Allowed values:
+```text
+NEW / ADMIN_CARD_PENDING
+→ NEW / SOURCE_PENDING
+→ NEW / CUSTOMER_CONFIRM_PENDING
+→ PROCESSING / WAITING_RESULT
+→ DELIVERY_PENDING / RESULT_PENDING
+→ DONE / COMPLETE
+```
+
+Recovery handles only:
 
 ```text
 ADMIN_CARD_PENDING
 SOURCE_PENDING
 CUSTOMER_CONFIRM_PENDING
-WAITING_RESULT
 RESULT_PENDING
-COMPLETE
 ```
 
-Meaning:
+`WAITING_RESULT` means the bot is waiting for the administrator to translate manually. `COMPLETE` needs no recovery.
 
-- `ADMIN_CARD_PENDING` — admin task card still needs to be delivered.
-- `SOURCE_PENDING` — task card exists; source book still needs to reach admin.
-- `CUSTOMER_CONFIRM_PENDING` — admin has source; customer still needs acceptance confirmation.
-- `WAITING_RESULT` — normal manual-translation state; recovery does nothing.
-- `RESULT_PENDING` — translated `file_id` is saved and customer delivery must complete.
-- `COMPLETE` — result reached customer; no recovery work remains.
+## Safe offset rules
 
-### State transitions
+For a new customer document:
 
 ```text
-NEW / ADMIN_CARD_PENDING
-        ↓
-NEW / SOURCE_PENDING
-        ↓
-NEW / CUSTOMER_CONFIRM_PENDING
-        ↓
-PROCESSING / WAITING_RESULT
-        ↓ admin uploads result
-DELIVERY_PENDING / RESULT_PENDING
-        ↓ successful customer delivery
-DONE / COMPLETE
+receive update
+→ insert bt_bot_tasks row including source_file_id
+→ update bt_bot_state.telegram_offset
+→ deliver task card/source/confirmation
 ```
 
-### Critical persistence rule
+If the update is replayed before the offset was saved, `telegram_update_id` prevents a second task row; the duplicate path only advances the offset.
 
-For administrator results the order is:
+For an administrator result:
 
 ```text
-1. receive translated Telegram file_id
-2. store translated_file_id
-3. set status = DELIVERY_PENDING
-4. set delivery_step = RESULT_PENDING
-5. set next_retry_at
-6. send document to customer
-7. only on success set DONE / COMPLETE
+receive translated file
+→ save translated_file_id
+→ status = DELIVERY_PENDING
+→ delivery_step = RESULT_PENDING
+→ update bt_bot_state.telegram_offset
+→ send result to customer
+→ success: DONE / COMPLETE
 ```
 
-This order prevents loss of the translated file reference during a network outage.
+Thus both source and translated Telegram `file_id` references are durable before their inbound updates are acknowledged.
 
-### Recovery fields
+## Recovery backoff
 
-`Recovery Schedule` runs every 5 minutes. It queries only pending delivery steps, and `Select Due Recoveries` additionally checks `next_retry_at` and `retry_count`.
-
-Backoff implemented by the workflow:
+`Recovery Schedule` runs every 5 minutes. Automatic persistent attempts are capped at 8, at most 20 due tasks are selected per run, and delays are:
 
 ```text
-retry 1  → +5 min
-retry 2  → +15 min
-retry 3  → +30 min
-retry 4  → +1 h
-retry 5  → +3 h
-retry 6  → +6 h
-retry 7  → +12 h
-retry 8  → +24 h
+5 min → 15 min → 30 min → 1 h → 3 h → 6 h → 12 h → 24 h
 ```
 
-At most 20 due tasks are selected per recovery run and automatic recovery is capped at 8 attempts.
+## Examples
 
-### Task number allocation
+CSV headers/examples live in:
 
-The workflow generates random six-digit candidates, filters values already present in `bt_bot_tasks`, and selects the first unused value.
-
-### Admin reply mapping
-
-The administrator replies with the translated file to the task-card message. The workflow resolves:
-
-```text
-bt_bot_tasks.admin_task_message_id = reply_to_message.message_id
-```
-
-## Migration from the polling version
-
-If you already created the old tables:
-
-1. Keep `bt_bot_users`.
-2. Add the new columns above to `bt_bot_tasks`.
-3. Existing unfinished tasks should be reviewed manually before migration; set `delivery_step` to match what has actually been delivered.
-4. Delete `bt_bot_state`; it is no longer referenced.
-5. Import the new workflow and configure Telegram Trigger.
-
-For a fresh test install, create only `bt_bot_users` and `bt_bot_tasks` using this schema.
+- `examples/users.csv`
+- `examples/tasks.csv`
+- `examples/state.csv`
