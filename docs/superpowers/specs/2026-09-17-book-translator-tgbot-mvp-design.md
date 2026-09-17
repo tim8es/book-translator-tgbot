@@ -4,46 +4,75 @@
 
 ## Goal
 
-Build a private Telegram bot backed by n8n for manually processed book-translation tasks. Only explicitly whitelisted Telegram users may use the bot. A user sends a book, the bot creates a numbered task and delivers it to the administrator. After manual translation, the administrator replies to the task card with the translated file and the bot returns it to the original customer.
+Build a private Telegram bot backed by local n8n for manually processed book-translation tasks. Only explicitly whitelisted Telegram users may use it. A customer sends a book, the bot creates a six-digit task and routes it to the administrator. The administrator later replies to the task card with the translated file and the bot returns it to the original customer.
 
-## Current architecture decision
+## Architecture decision
 
-The MVP is event-driven and optimized for low idle resource use.
+The MVP uses **Telegram long polling through `getUpdates`**, not a webhook, because the target n8n instance has no public address.
 
-- Telegram updates enter through **Telegram Trigger** / webhook.
-- There is no 10-second polling loop and no `bt_bot_state` table.
-- `bt_bot_tasks` is the durable delivery state machine.
-- Critical Telegram operations use short built-in retries.
-- A recovery schedule runs every 5 minutes and retries only due pending tasks.
-- No Redis, RabbitMQ, external queue, PostgreSQL or external object storage is required for the MVP.
-- Source and translated books are referenced by Telegram `file_id` values rather than persisted as n8n binary files.
+- `Schedule Poll` runs every 30 seconds.
+- `getUpdates` reads one update at a time (`limit=1`).
+- `bt_bot_state.telegram_offset` stores the durable polling cursor.
+- `bt_bot_tasks` stores business state and recovery state.
+- Source and result documents are referenced by Telegram `file_id` values.
+- Critical Telegram calls use short built-in retries.
+- A recovery schedule runs every 5 minutes for due pending deliveries.
+- No Redis, RabbitMQ, PostgreSQL or external object storage is required for the MVP.
+
+No public domain, HTTPS webhook, tunnel or reverse proxy is required.
 
 ## Authorization
 
-Customer access is based only on immutable numeric Telegram `user_id` values in `bt_bot_users` with `status = ACTIVE`.
+Customer access uses numeric Telegram `user_id` in `bt_bot_users` with `status = ACTIVE`. Username is metadata only.
 
-Telegram `username` is metadata only and never grants access.
+The administrator is identified by numeric `ADMIN_USER_ID` in `Bot Config`. `ADMIN_CHAT_ID` may fall back to the same value for a private bot conversation.
 
-The administrator is identified by numeric `ADMIN_USER_ID` and `ADMIN_CHAT_ID` configured locally in **Admin Config**.
-
-## Supported files
-
-Source documents:
+## Supported source files
 
 - `.epub`
 - `.pdf`
 - `.docx`
 - `.txt`
 
-Unsupported files do not create a task.
+Unsupported files do not create tasks.
 
 ## Task numbering
 
-User-facing task numbers are random six-digit integers from `100000` through `999999`.
+User-facing task numbers are random six-digit integers from `100000` through `999999`. Multiple candidates are generated and values already present in `bt_bot_tasks` are rejected.
 
-The workflow generates multiple candidates, filters numbers already present in `bt_bot_tasks`, and selects a free candidate. `telegram_update_id` is also stored as a duplicate guard.
+`telegram_update_id` is stored separately as an inbound duplicate guard.
 
-## Durable state machine
+## Safe polling acknowledgement
+
+The Telegram offset must never be advanced before the data required to recover the inbound update is durable.
+
+Customer source upload:
+
+```text
+receive Telegram update
+→ authorize + duplicate check
+→ persist task row including source_file_id
+→ persist next Telegram offset
+→ deliver task card/source/customer confirmation
+```
+
+If the same source update is replayed after task persistence but before offset persistence, `telegram_update_id` detects the existing task and the duplicate path only acknowledges the offset.
+
+Administrator result upload:
+
+```text
+receive translated file
+→ resolve task from replied task-card message
+→ persist translated_file_id
+→ status = DELIVERY_PENDING
+→ delivery_step = RESULT_PENDING
+→ persist next Telegram offset
+→ deliver result to customer
+```
+
+Simple conversational interactions such as `/start`, help and access-denied replies acknowledge the update only after the response send succeeds.
+
+## Durable task state
 
 Task status values:
 
@@ -66,110 +95,59 @@ RESULT_PENDING
 COMPLETE
 ```
 
-Flow:
+Normal flow:
 
 ```text
 NEW / ADMIN_CARD_PENDING
-        ↓
-NEW / SOURCE_PENDING
-        ↓
-NEW / CUSTOMER_CONFIRM_PENDING
-        ↓
-PROCESSING / WAITING_RESULT
-        ↓ admin supplies translated file
-DELIVERY_PENDING / RESULT_PENDING
-        ↓ successful customer delivery
-DONE / COMPLETE
+→ NEW / SOURCE_PENDING
+→ NEW / CUSTOMER_CONFIRM_PENDING
+→ PROCESSING / WAITING_RESULT
+→ DELIVERY_PENDING / RESULT_PENDING
+→ DONE / COMPLETE
 ```
 
-The delivery state is persisted after each completed step so an execution failure or n8n restart does not require restarting the entire task.
+## Critical translated-file guarantee
 
-## Critical translated-file safety rule
+`translated_file_id` and `RESULT_PENDING` are persisted before customer delivery and before the admin upload update is acknowledged. A temporary outbound failure therefore does not require the administrator to upload the translation again.
 
-When the administrator replies with a translated document, the workflow persists:
-
-```text
-translated_file_id
-status = DELIVERY_PENDING
-delivery_step = RESULT_PENDING
-next_retry_at
-```
-
-before attempting to send that document to the customer.
-
-Only after the Telegram customer-delivery call succeeds may the workflow set:
-
-```text
-status = DONE
-delivery_step = COMPLETE
-completed_at = now
-next_retry_at = null
-```
-
-This is the central reliability guarantee of the MVP.
+Only a successful customer Telegram send may advance the task to `DONE / COMPLETE`.
 
 ## Recovery
 
-A recovery schedule runs every 5 minutes.
+`Recovery Schedule` runs every 5 minutes and considers only:
 
-It queries `ADMIN_CARD_PENDING`, `SOURCE_PENDING`, `CUSTOMER_CONFIRM_PENDING` and `RESULT_PENDING`, then uses `next_retry_at` and `retry_count` to select due work.
+```text
+ADMIN_CARD_PENDING
+SOURCE_PENDING
+CUSTOMER_CONFIRM_PENDING
+RESULT_PENDING
+```
 
-Backoff sequence:
+At most 20 due tasks are selected per run. Automatic persistent recovery is capped at 8 attempts with:
 
 ```text
 5 min → 15 min → 30 min → 1 h → 3 h → 6 h → 12 h → 24 h
 ```
 
-At most 20 due tasks are selected per run and automatic recovery is capped at 8 attempts.
+`WAITING_RESULT` and `COMPLETE` are not recovery work.
 
-`WAITING_RESULT`, `DONE` and `COMPLETE` are not active recovery work.
+## Persisted recovery material
 
-## Persisted message material
-
-To recover notification steps without the original execution context, the task row stores:
+Each task stores enough context to resume after an n8n restart:
 
 ```text
+customer_chat_id
 admin_chat_id
+admin_task_message_id
 admin_task_text
+source_file_id
 source_caption
 customer_confirmation_text
+translated_file_id
+delivery_step
+retry_count
+next_retry_at
 ```
-
-Together with `source_file_id`, `translated_file_id`, customer chat ID and `delivery_step`, this is enough to continue a pending delivery after an n8n restart.
-
-## Customer flow
-
-1. Telegram Trigger receives update.
-2. Admin Config attaches local admin IDs.
-3. Normalize sender, chat, message/document and reply metadata.
-4. Route admin/customer.
-5. Check customer numeric ID in `bt_bot_users` on every customer interaction.
-6. `/start` returns guidance only.
-7. Supported source file passes duplicate guard.
-8. Allocate six-digit task number.
-9. Persist task with `ADMIN_CARD_PENDING`.
-10. Send admin task card and store its Telegram message ID.
-11. Send source file to admin.
-12. Confirm task to customer.
-13. Set `PROCESSING / WAITING_RESULT`.
-
-## Admin completion flow
-
-1. Administrator replies to the stored task-card Telegram message with a document.
-2. Find task by `admin_task_message_id`.
-3. Reject unknown, completed or already pending-delivery tasks.
-4. Persist the translated `file_id` and `RESULT_PENDING` state.
-5. Attempt customer delivery.
-6. On success mark `DONE / COMPLETE` and confirm completion to admin.
-7. On longer network failure leave `RESULT_PENDING` for scheduled recovery.
-
-## Resource goal
-
-When nobody uses the bot, the Telegram-driven main path performs zero polling executions.
-
-Only the recovery trigger runs every 5 minutes (~288 runs/day), and it exits quickly if no task is due.
-
-This replaces the previous 10-second polling design (~8,640 executions/day even when idle).
 
 ## Data tables
 
@@ -178,22 +156,36 @@ The MVP uses:
 ```text
 bt_bot_users
 bt_bot_tasks
+bt_bot_state
 ```
 
-No `bt_bot_state` table is required. The exact schemas are documented in `docs/data-model.md`.
+`bt_bot_state` starts with:
+
+```text
+key = telegram_offset
+value = 0
+```
+
+Exact schemas are in `docs/data-model.md`.
 
 ## Secrets and configuration
 
-- Telegram bot token lives in an n8n Telegram API credential.
-- The workflow JSON must not contain a real bot token or credential binding.
-- Admin numeric IDs are configured locally in `Admin Config` after import.
-- The public repository contains placeholders/example IDs only.
+- The committed workflow contains only a bot-token placeholder.
+- The real bot token is filled locally in `Bot Config` for `getUpdates`.
+- The same bot token is stored in an n8n Telegram API credential for outgoing Telegram nodes.
+- The export contains no real bot token and no credential binding.
+- Real administrator IDs are configured locally.
 
-## Deployment requirement
+## Resource profile
 
-Telegram Trigger requires n8n to expose a public HTTPS webhook URL.
+Idle scheduled executions are approximately:
 
-Local testing therefore requires an HTTPS tunnel/reverse proxy or an n8n instance that is already publicly reachable via HTTPS.
+```text
+polling every 30 seconds ≈ 2,880/day
+recovery every 5 minutes ≈ 288/day
+```
+
+The 30-second cadence replaces the earlier 10-second polling design and reduces idle polling executions by roughly two thirds while keeping normal response delay bounded to about one polling interval.
 
 ## Acceptance requirements
 
@@ -201,28 +193,26 @@ The MVP is acceptable when:
 
 1. whitelist and supported-file behavior works;
 2. one source upload creates exactly one task;
-3. admin receives task card and source file;
-4. customer receives task confirmation;
+3. task persistence occurs before offset acknowledgement;
+4. admin receives task card and source file;
 5. administrator reply maps to the correct task;
-6. translated `file_id` is saved before customer delivery;
-7. result delivery failure leaves a recoverable `RESULT_PENDING` task;
-8. pending delivery survives n8n restart;
-9. recovery completes due work after connectivity returns;
-10. there is no continuous 10-second polling when idle;
-11. `npm test` validates the exported workflow structure.
+6. translated `file_id` and `RESULT_PENDING` are stored before result-update acknowledgement;
+7. result delivery failure remains recoverable after network restoration or n8n restart;
+8. recovery applies bounded retry/backoff;
+9. no webhook/public URL is needed;
+10. repository validation passes;
+11. manual n8n/Telegram acceptance tests pass in the owner's environment.
 
 ## Out of scope
 
 - payments;
 - automatic translation;
-- text extraction and character pricing;
+- text extraction and pricing;
 - multiple administrators;
-- customer task history UI;
+- customer task-history UI;
 - cancellation UI;
 - external object storage;
-- Redis / RabbitMQ;
+- Redis/RabbitMQ;
 - PostgreSQL/Supabase;
 - public bot access;
 - high-concurrency distributed locking.
-
-If volume grows significantly, the state model can move from n8n Data Tables to PostgreSQL while keeping the same task/delivery states and Telegram UX.
