@@ -13,16 +13,24 @@ n8n adds its own system `id`, `createdAt`, and `updatedAt` columns; do not creat
 | Column | Type | Required | Notes |
 | --- | --- | --- | --- |
 | `key` | String | yes | State key. |
-| `value` | Number | yes | Numeric state value. |
+| `value` | String | yes | JSON-encoded state. |
 
-Create exactly one initial row:
+The workflow automatically creates this row if it is missing:
 
 ```text
-key = telegram_offset
-value = 0
+key = telegram_state
+value = {"offset":0,"lockToken":"","lockUntil":0}
 ```
 
-`telegram_offset` is the next Telegram update ID that polling may request. It is advanced only after the current update reaches a safe checkpoint.
+Meaning:
+
+- `offset` — next Telegram update ID eligible for polling;
+- `lockToken` — owner token of the active poll lease, empty when unlocked;
+- `lockUntil` — lease expiration timestamp in milliseconds.
+
+A poll obtains the lease with a compare-and-set update: the Data Table row is updated only if its complete previous JSON value is still unchanged. This prevents two overlapping executions from both owning the same update. The lease lasts 120 seconds; if an execution crashes before acknowledgement, a later poll may continue after expiration.
+
+Older `telegram_offset` rows are ignored by the current workflow and may be deleted. If an older `bt_bot_state.value` column was created as **Number**, recreate/change it to **String** before importing this workflow.
 
 ## `bt_bot_users`
 
@@ -80,32 +88,44 @@ RESULT_PENDING
 
 `WAITING_RESULT` means the bot is waiting for the administrator to translate manually. `COMPLETE` needs no recovery.
 
-## Safe offset rules
+## Safe inbound acknowledgement
 
 For a new customer document:
 
 ```text
 receive update
+→ acquire telegram_state lease
 → insert bt_bot_tasks row including source_file_id
-→ update bt_bot_state.telegram_offset
+→ CAS-update telegram_state to next offset and release lease
 → deliver task card/source/confirmation
 ```
 
-If the update is replayed before the offset was saved, `telegram_update_id` prevents a second task row; the duplicate path only advances the offset.
+If the task row was persisted but cursor acknowledgement failed, the update can be received again. `telegram_update_id` detects the already-created task and only acknowledges that update rather than creating a second task.
 
 For an administrator result:
 
 ```text
 receive translated file
+→ acquire telegram_state lease
 → save translated_file_id
 → status = DELIVERY_PENDING
 → delivery_step = RESULT_PENDING
-→ update bt_bot_state.telegram_offset
+→ CAS-update telegram_state to next offset and release lease
 → send result to customer
 → success: DONE / COMPLETE
 ```
 
-Thus both source and translated Telegram `file_id` references are durable before their inbound updates are acknowledged.
+Thus both source and translated Telegram `file_id` references become durable before their inbound updates are acknowledged.
+
+## Telegram webhook conflict
+
+Polling is incompatible with an active Telegram webhook. `Telegram getUpdates` is configured to expose non-2xx responses. If Telegram returns `409`, the workflow automatically calls:
+
+```text
+deleteWebhook(drop_pending_updates=false)
+```
+
+Queued Telegram updates are preserved, and the next polling cycle retries normally.
 
 ## Recovery backoff
 
@@ -121,4 +141,4 @@ CSV headers/examples live in:
 
 - `examples/users.csv`
 - `examples/tasks.csv`
-- `examples/state.csv`
+- `examples/state.csv` — optional state example; no initial row is required for a fresh setup.
