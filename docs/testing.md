@@ -51,7 +51,8 @@ Expected:
 Expected customer result:
 
 - confirmation contains a six-digit number matching `100000–999999`;
-- confirmation includes the original filename.
+- confirmation says: `Ориентировочная скорость перевода — до 15 минут на каждые 10 000 знаков.`;
+- confirmation notes that actual time depends on the book volume and format.
 
 Expected Data Table result:
 
