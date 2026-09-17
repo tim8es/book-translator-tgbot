@@ -7,9 +7,9 @@ Run `npm test` first, then test against the local n8n instance and Telegram bot.
 - workflow imported;
 - **Bot Config** contains local bot token, `ADMIN_USER_ID`, and `ADMIN_CHAT_ID`;
 - Telegram API credential selected on all Telegram action nodes;
-- `users`, `tasks`, and `bot_state` exist;
-- `bot_state` contains `telegram_offset = 0` (or the current offset after prior tests);
-- `tasks` includes the `telegram_update_id` Number column;
+- `bt_bot_users`, `bt_bot_tasks`, and `bt_bot_state` exist;
+- `bt_bot_state` contains `telegram_offset = 0` (or the current offset after prior tests);
+- `bt_bot_tasks` includes the `telegram_update_id` Number column;
 - any old Telegram webhook for this bot has been deleted once;
 - one test customer and one small supported source file are available.
 
@@ -30,7 +30,7 @@ Expected:
 
 ## T01 — unauthorized user
 
-Send `/start` from a customer absent from `users` or with `status = BLOCKED`.
+Send `/start` from a customer absent from `bt_bot_users` or with `status = BLOCKED`.
 
 Expected:
 
@@ -60,7 +60,7 @@ Expected:
 
 Send one supported EPUB/PDF/DOCX/TXT document once.
 
-Expected `tasks` result:
+Expected `bt_bot_tasks` result:
 
 - exactly **one** new row;
 - `telegram_update_id` is populated;
@@ -93,14 +93,14 @@ This verifies the bug where one upload previously created several tasks.
 Expected:
 
 - `Task Update Not Seen` produces no task-creation output;
-- no second `tasks` row is created;
+- no second `bt_bot_tasks` row is created;
 - admin/customer receive no duplicate task notifications.
 
 Do not change `telegram_update_id` during this test.
 
 ## T06 — polling offset persistence
 
-After any processed message, inspect `bot_state`.
+After any processed message, inspect `bt_bot_state`.
 
 Expected:
 

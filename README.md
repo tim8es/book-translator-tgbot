@@ -5,8 +5,8 @@ Private Telegram bot for accepting book-translation tasks and returning manually
 ## What it does
 
 1. n8n polls Telegram every 10 seconds with `getUpdates`.
-2. The next Telegram offset is stored immediately in `bot_state` before the business logic runs.
-3. The bot checks the customer's numeric Telegram `user_id` against the `users` Data Table.
+2. The next Telegram offset is stored immediately in `bt_bot_state` before the business logic runs.
+3. The bot checks the customer's numeric Telegram `user_id` against the `bt_bot_users` Data Table.
 4. A supported EPUB/PDF/DOCX/TXT upload is deduplicated by `telegram_update_id`.
 5. The bot creates one six-digit task number.
 6. The administrator receives one task card and the source book.
@@ -31,7 +31,7 @@ Schedule Poll
   -> Normalize + Config
 ```
 
-The offset is persisted to the `bot_state` Data Table before customer/admin processing. `tasks.telegram_update_id` provides an additional task-level duplicate guard.
+The offset is persisted to the `bt_bot_state` Data Table before customer/admin processing. `bt_bot_tasks.telegram_update_id` provides an additional task-level duplicate guard.
 
 ## Quick start
 
@@ -43,11 +43,11 @@ Create a bot with `@BotFather`, then create an n8n **Telegram API** credential u
 
 Create exactly:
 
-- `users`
-- `tasks`
-- `bot_state`
+- `bt_bot_users`
+- `bt_bot_tasks`
+- `bt_bot_state`
 
-Use [`docs/data-model.md`](docs/data-model.md). Add this initial `bot_state` row:
+Use [`docs/data-model.md`](docs/data-model.md). Add this initial `bt_bot_state` row:
 
 ```text
 key               value
@@ -96,7 +96,7 @@ Then publish the polling workflow.
 
 ### 7. Add whitelist customers
 
-Add a row to `users` with numeric `user_id` and `status = ACTIVE`.
+Add a row to `bt_bot_users` with numeric `user_id` and `status = ACTIVE`.
 
 ## Expected upload behavior
 
@@ -126,7 +126,7 @@ The validator checks:
 
 - no Telegram Trigger/webhook dependency;
 - compatible Schedule Trigger version;
-- `bot_state` offset persistence before business logic;
+- `bt_bot_state` offset persistence before business logic;
 - `telegram_update_id` deduplication;
 - the three Data Table references;
 - disabled n8n attribution on Send Message nodes;

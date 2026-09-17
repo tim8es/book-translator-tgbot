@@ -1,10 +1,10 @@
 # Data model
 
-MVP uses three n8n Data Tables named exactly `users`, `tasks`, and `bot_state`.
+MVP uses three n8n Data Tables named exactly `bt_bot_users`, `bt_bot_tasks`, and `bt_bot_state`.
 
 > n8n automatically adds its own `id`, `createdAt`, and `updatedAt` system columns. Do not create those columns manually.
 
-## `users`
+## `bt_bot_users`
 
 | Column | n8n type | Required | Notes |
 | --- | --- | --- | --- |
@@ -24,7 +24,7 @@ status     ACTIVE
 created_at 2026-09-17T12:00:00.000Z
 ```
 
-## `tasks`
+## `bt_bot_tasks`
 
 | Column | n8n type | Required | Notes |
 | --- | --- | --- | --- |
@@ -54,17 +54,17 @@ A task changes to `PROCESSING` only after the administrator task card has been s
 
 ### Task number allocation
 
-For each valid source file the workflow generates random six-digit candidates in `100000`–`999999`, filters out numbers already present in `tasks`, and selects the first unused one.
+For each valid source file the workflow generates random six-digit candidates in `100000`–`999999`, filters out numbers already present in `bt_bot_tasks`, and selects the first unused one.
 
 ### Admin reply mapping
 
 The administrator replies with the translated file to the task-card message. The workflow resolves:
 
 ```text
-tasks.admin_task_message_id = reply_to_message.message_id
+bt_bot_tasks.admin_task_message_id = reply_to_message.message_id
 ```
 
-## `bot_state`
+## `bt_bot_state`
 
 Create exactly these columns:
 
@@ -90,10 +90,10 @@ This write happens before whitelist/task/message processing, so the next polling
 
 ## Creating the tables
 
-1. Create `users` with the columns above.
-2. Create `tasks` with the columns above, including `telegram_update_id`.
-3. Create `bot_state` with `key` and `value`.
-4. Add `telegram_offset / 0` to `bot_state`.
-5. Add at least one test customer to `users` with `status = ACTIVE`.
+1. Create `bt_bot_users` with the columns above.
+2. Create `bt_bot_tasks` with the columns above, including `telegram_update_id`.
+3. Create `bt_bot_state` with `key` and `value`.
+4. Add `telegram_offset / 0` to `bt_bot_state`.
+5. Add at least one test customer to `bt_bot_users` with `status = ACTIVE`.
 
 `examples/users.csv`, `examples/tasks.csv`, and `examples/bot_state.csv` show the expected layouts. All IDs are fake examples.

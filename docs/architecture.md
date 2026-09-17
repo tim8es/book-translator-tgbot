@@ -31,7 +31,7 @@ Restore Telegram Update
 Normalize + Config
 ```
 
-The offset is stored in the `bot_state` Data Table **before** whitelist checks, task creation, or Telegram sends. This is intentionally different from workflow static data: a long-running downstream execution no longer delays offset persistence until the rest of the workflow completes.
+The offset is stored in the `bt_bot_state` Data Table **before** whitelist checks, task creation, or Telegram sends. This is intentionally different from workflow static data: a long-running downstream execution no longer delays offset persistence until the rest of the workflow completes.
 
 The workflow does not use Telegram Trigger, webhooks, `$env`, or paid n8n Variables.
 
@@ -54,7 +54,7 @@ deny      /start or document
         supported document
                |
       Task Update Not Seen
-   (tasks.telegram_update_id)
+   (bt_bot_tasks.telegram_update_id)
                |
       task-number allocation
                |
@@ -82,7 +82,7 @@ For one Telegram book upload, the intended invariant is:
 There are two layers:
 
 1. `bot_state.telegram_offset` advances immediately after the update is received.
-2. `tasks.telegram_update_id` is checked by `Task Update Not Seen` before task allocation.
+2. `bt_bot_tasks.telegram_update_id` is checked by `Task Update Not Seen` before task allocation.
 
 The second layer specifically prevents the previously observed failure where one Telegram upload produced several task numbers.
 
@@ -93,7 +93,7 @@ For this private low-volume MVP, this is sufficient. A high-concurrency producti
 Customer authorization:
 
 ```text
-message.from.id -> users.user_id
+message.from.id -> bt_bot_users.user_id
 ```
 
 Access requires `status = ACTIVE`. Username is metadata only.

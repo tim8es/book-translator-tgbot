@@ -88,13 +88,13 @@ A successful response contains `"ok": true`.
 
 Create exactly three Data Tables:
 
-- `users`
-- `tasks`
-- `bot_state`
+- `bt_bot_users`
+- `bt_bot_tasks`
+- `bt_bot_state`
 
 Follow [`data-model.md`](data-model.md) for column names and types.
 
-For `bot_state`, add this initial row:
+For `bt_bot_state`, add this initial row:
 
 ```text
 key               value
@@ -103,11 +103,11 @@ telegram_offset   0
 
 The workflow reads this value before `getUpdates` and immediately writes `update_id + 1` after receiving an update.
 
-The `tasks` table also needs the `telegram_update_id` column. It is a second idempotency guard: the same Telegram upload must not create a second task even if it is accidentally seen again.
+The `bt_bot_tasks` table also needs the `telegram_update_id` column. It is a second idempotency guard: the same Telegram upload must not create a second task even if it is accidentally seen again.
 
 ## 7. Add whitelist users
 
-Add customers manually to `users`.
+Add customers manually to `bt_bot_users`.
 
 Example:
 

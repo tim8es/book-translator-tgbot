@@ -73,7 +73,7 @@ for (const expected of ['PASTE_TELEGRAM_BOT_TOKEN_HERE', 'ADMIN_USER_ID', 'ADMIN
 if (botConfigCode.includes('$env')) errors.push('Bot Config must not depend on $env');
 
 const getPollState = byName.get('Get Poll State');
-if (getPollState?.parameters?.dataTableId?.value !== 'bot_state') errors.push('Get Poll State must use bot_state');
+if (getPollState?.parameters?.dataTableId?.value !== 'bt_bot_state') errors.push('Get Poll State must use bot_state');
 const pollStateFilters = getPollState?.parameters?.filters?.conditions ?? [];
 if (!pollStateFilters.some((f) => f.keyName === 'key' && f.keyValue === 'telegram_offset')) {
   errors.push('Get Poll State must read key=telegram_offset');
@@ -97,7 +97,7 @@ for (const expected of ['telegram_update_id', 'next_offset', 'update_id']) {
 if (expandCode.includes('$getWorkflowStaticData')) errors.push('Polling offset must not use workflow static data');
 
 const savePoll = byName.get('Save Poll Offset');
-if (savePoll?.parameters?.dataTableId?.value !== 'bot_state') errors.push('Save Poll Offset must use bot_state');
+if (savePoll?.parameters?.dataTableId?.value !== 'bt_bot_state') errors.push('Save Poll Offset must use bot_state');
 if (savePoll?.parameters?.columns?.value?.value !== '={{ $json.next_offset }}') {
   errors.push('Save Poll Offset must persist next_offset');
 }
@@ -111,7 +111,7 @@ for (const extension of ['epub', 'pdf', 'docx', 'txt']) {
 }
 
 const taskGuard = byName.get('Task Update Not Seen');
-if (taskGuard?.parameters?.dataTableId?.value !== 'tasks') errors.push('Task Update Not Seen must use tasks');
+if (taskGuard?.parameters?.dataTableId?.value !== 'bt_bot_tasks') errors.push('Task Update Not Seen must use tasks');
 const taskGuardFilters = taskGuard?.parameters?.filters?.conditions ?? [];
 if (!taskGuardFilters.some((f) => f.keyName === 'telegram_update_id')) {
   errors.push('Task Update Not Seen must deduplicate on telegram_update_id');
@@ -141,7 +141,7 @@ if (byName.get('Confirm Task to Customer')?.parameters?.text !== "={{ $('Prepare
 
 const dataTableNodes = nodes.filter((node) => node.type === 'n8n-nodes-base.dataTable');
 const tableNames = new Set(dataTableNodes.map((node) => node.parameters?.dataTableId?.value));
-for (const table of ['users', 'tasks', 'bot_state']) {
+for (const table of ['bt_bot_users', 'bt_bot_tasks', 'bt_bot_state']) {
   if (!tableNames.has(table)) errors.push(`Workflow must reference Data Table: ${table}`);
 }
 for (const node of dataTableNodes) {
