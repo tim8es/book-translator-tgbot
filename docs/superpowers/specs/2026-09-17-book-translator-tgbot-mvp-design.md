@@ -8,14 +8,18 @@ Build a private Telegram bot backed by local n8n for manually processed book-tra
 
 ## Architecture decision
 
-The MVP uses **Telegram long polling through `getUpdates`**, not a webhook, because the target n8n instance has no public address.
+The MVP uses **Telegram polling through `getUpdates`**, not a webhook, because the target n8n instance has no public address.
 
 - `Schedule Poll` runs every 30 seconds.
 - `getUpdates` reads one update at a time (`limit=1`).
-- `bt_bot_state.telegram_offset` stores the durable polling cursor.
+- `bt_bot_state.telegram_state` stores the polling cursor and processing lease as JSON.
+- The polling state row is created automatically if missing.
+- A compare-and-set lease serializes overlapping poll executions.
+- A stale lease expires after 120 seconds so a crashed execution cannot deadlock the bot.
+- Telegram webhook conflict `409` is handled automatically with `deleteWebhook(drop_pending_updates=false)`.
 - `bt_bot_tasks` stores business state and recovery state.
 - Source and result documents are referenced by Telegram `file_id` values.
-- Critical Telegram calls use short built-in retries.
+- Critical Telegram sends use short built-in retries.
 - A recovery schedule runs every 5 minutes for due pending deliveries.
 - No Redis, RabbitMQ, PostgreSQL or external object storage is required for the MVP.
 
@@ -42,6 +46,28 @@ User-facing task numbers are random six-digit integers from `100000` through `99
 
 `telegram_update_id` is stored separately as an inbound duplicate guard.
 
+## Polling state
+
+`bt_bot_state` has two columns:
+
+```text
+key   String
+value String
+```
+
+The workflow owns one row:
+
+```text
+key = telegram_state
+value = {"offset":0,"lockToken":"","lockUntil":0}
+```
+
+The row is auto-created on first use.
+
+Before processing a fetched update, the workflow attempts a compare-and-set update from the exact previously-read JSON value to a leased value containing a random `lockToken` and a `lockUntil` timestamp 120 seconds in the future. Only the execution that successfully updates that exact value continues into business logic.
+
+Acknowledgement also uses compare-and-set against the exact lease value owned by that execution. A stale execution cannot overwrite newer polling state.
+
 ## Safe polling acknowledgement
 
 The Telegram offset must never be advanced before the data required to recover the inbound update is durable.
@@ -50,27 +76,39 @@ Customer source upload:
 
 ```text
 receive Telegram update
+→ acquire processing lease
 → authorize + duplicate check
 → persist task row including source_file_id
-→ persist next Telegram offset
+→ persist next Telegram offset and release lease
 → deliver task card/source/customer confirmation
 ```
 
-If the same source update is replayed after task persistence but before offset persistence, `telegram_update_id` detects the existing task and the duplicate path only acknowledges the offset.
+If the same source update is replayed after task persistence but before cursor persistence, `telegram_update_id` detects the existing task and the duplicate path only acknowledges the update.
 
 Administrator result upload:
 
 ```text
 receive translated file
+→ acquire processing lease
 → resolve task from replied task-card message
 → persist translated_file_id
 → status = DELIVERY_PENDING
 → delivery_step = RESULT_PENDING
-→ persist next Telegram offset
+→ persist next Telegram offset and release lease
 → deliver result to customer
 ```
 
 Simple conversational interactions such as `/start`, help and access-denied replies acknowledge the update only after the response send succeeds.
+
+## Webhook conflict recovery
+
+`getUpdates` exposes the full Telegram API response instead of treating non-2xx as an opaque node failure. If Telegram reports `409`, the workflow calls:
+
+```text
+deleteWebhook(drop_pending_updates=false)
+```
+
+No cursor is advanced by the conflict. Telegram's pending updates are preserved and the next polling cycle retries the same cursor.
 
 ## Durable task state
 
@@ -149,29 +187,10 @@ retry_count
 next_retry_at
 ```
 
-## Data tables
-
-The MVP uses:
-
-```text
-bt_bot_users
-bt_bot_tasks
-bt_bot_state
-```
-
-`bt_bot_state` starts with:
-
-```text
-key = telegram_offset
-value = 0
-```
-
-Exact schemas are in `docs/data-model.md`.
-
 ## Secrets and configuration
 
 - The committed workflow contains only a bot-token placeholder.
-- The real bot token is filled locally in `Bot Config` for `getUpdates`.
+- The real bot token is filled locally in `Bot Config` for Bot API HTTP requests.
 - The same bot token is stored in an n8n Telegram API credential for outgoing Telegram nodes.
 - The export contains no real bot token and no credential binding.
 - Real administrator IDs are configured locally.
@@ -185,23 +204,33 @@ polling every 30 seconds ≈ 2,880/day
 recovery every 5 minutes ≈ 288/day
 ```
 
-The 30-second cadence replaces the earlier 10-second polling design and reduces idle polling executions by roughly two thirds while keeping normal response delay bounded to about one polling interval.
+`getUpdates` uses an explicit 10-second HTTP timeout and two network attempts. This avoids a transient connection problem holding a polling execution for the much longer generic HTTP-node default timeout.
+
+## Delivery semantics
+
+Normal duplicate task creation is guarded by `telegram_update_id`, durable cursor acknowledgement and the polling lease.
+
+Telegram Bot API does not expose a generic exactly-once idempotency key for ordinary `sendMessage` / `sendDocument` calls. In the rare ambiguous case where Telegram accepted an outbound send but the network response was lost before n8n could persist the next state, a retry can duplicate that outbound message. The design chooses recoverability and possible duplicate delivery over silent data loss.
 
 ## Acceptance requirements
 
 The MVP is acceptable when:
 
 1. whitelist and supported-file behavior works;
-2. one source upload creates exactly one task;
-3. task persistence occurs before offset acknowledgement;
-4. admin receives task card and source file;
-5. administrator reply maps to the correct task;
-6. translated `file_id` and `RESULT_PENDING` are stored before result-update acknowledgement;
-7. result delivery failure remains recoverable after network restoration or n8n restart;
-8. recovery applies bounded retry/backoff;
-9. no webhook/public URL is needed;
-10. repository validation passes;
-11. manual n8n/Telegram acceptance tests pass in the owner's environment.
+2. polling state initializes itself;
+3. overlapping poll executions are serialized by the lease;
+4. abandoned lease expires and processing recovers;
+5. old webhook conflict self-heals without dropping queued updates;
+6. one source upload creates exactly one task;
+7. task persistence occurs before cursor acknowledgement;
+8. admin receives task card and source file;
+9. administrator reply maps to the correct task;
+10. translated `file_id` and `RESULT_PENDING` are stored before result-update acknowledgement;
+11. result delivery failure remains recoverable after network restoration or n8n restart;
+12. recovery applies bounded retry/backoff;
+13. no public URL is needed;
+14. repository validation passes;
+15. manual n8n/Telegram acceptance tests pass in the owner's environment.
 
 ## Out of scope
 
@@ -215,4 +244,4 @@ The MVP is acceptable when:
 - Redis/RabbitMQ;
 - PostgreSQL/Supabase;
 - public bot access;
-- high-concurrency distributed locking.
+- mathematically exactly-once Telegram outbound delivery.
