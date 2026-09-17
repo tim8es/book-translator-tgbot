@@ -13,55 +13,100 @@ Schedule Poll (30 s)
         ↓
 Bot Config
         ↓
-Get Poll State
-bt_bot_state.telegram_offset
+ensure bt_bot_state.telegram_state exists
         ↓
-Telegram getUpdates
-limit = 1
+read offset / active lease
         ↓
-Expand Telegram Update
+Telegram getUpdates (limit=1)
         ↓
-Normalize + Config
-        ↓
-Role Switch
+inspect response
+   ↙        ↓        ↘
+ idle     update      409
+           ↓           ↓
+       CAS lease   deleteWebhook
+           ↓       preserve queue
+     normalize/route
 ```
 
-There is no Telegram Trigger/webhook. Polling requires only outbound HTTPS access from n8n to Telegram.
+There is no Telegram Trigger. Polling requires only outbound HTTPS access from n8n to Telegram.
 
-## Offset safety
+## Poll state and serialization
 
-`telegram_offset` is an acknowledgement boundary, not just a cursor.
+`bt_bot_state` contains one JSON state record:
+
+```text
+key = telegram_state
+value = {"offset":0,"lockToken":"","lockUntil":0}
+```
+
+The workflow creates it automatically if missing.
+
+Before a fetched update enters business logic, `Prepare Poll Lock` creates a random token and a 120-second lease. `Acquire Poll Lock` performs a compare-and-set update using both:
+
+```text
+key = telegram_state
+value = exact previously-read JSON
+```
+
+Only one overlapping execution can successfully replace that exact previous value. An execution that loses the race produces no item and stops before business processing.
+
+While a lease is active, later scheduled polls exit before calling Telegram. If the owner crashes, `lockUntil` eventually expires and a later poll can acquire a new lease for the still-unacknowledged offset.
+
+Cursor acknowledgement is also compare-and-set: an ack node updates `telegram_state` only if the row still contains the lease value owned by that execution. A stale execution therefore cannot overwrite newer state.
+
+## Telegram webhook self-healing
+
+`Telegram getUpdates` uses:
+
+```text
+Never Error = true
+Include Full Response = true
+HTTP timeout = 10 seconds
+network attempts = 2
+```
+
+This lets the workflow inspect Telegram API error codes itself. If Telegram returns `409` because a webhook is registered, the workflow calls:
+
+```text
+deleteWebhook(drop_pending_updates=false)
+```
+
+No update has been leased or acknowledged at that point, and queued Telegram updates are preserved. The next polling cycle resumes with the same offset.
+
+## Safe acknowledgement boundary
 
 For a new customer document:
 
 ```text
 Telegram update
+→ acquire CAS lease
 → normalize + authorize
 → duplicate guard by telegram_update_id
 → allocate six-digit task number
 → persist bt_bot_tasks row + source_file_id
-→ acknowledge next_offset in bt_bot_state
+→ CAS-ack next offset and release lease
 → deliver admin card/source/customer confirmation
 ```
 
-If execution fails before task persistence, the offset is not advanced. If it fails after task persistence but before offset acknowledgement, the same update can be received again and the duplicate guard routes it to offset acknowledgement without creating a second task.
+If execution fails before task persistence, the cursor is not advanced. If it fails after task persistence but before acknowledgement, the update can be received again and `telegram_update_id` routes it to acknowledgement without creating a second task.
 
 For an administrator result:
 
 ```text
 Telegram result update
+→ acquire CAS lease
 → resolve task from replied task-card message
 → persist translated_file_id
 → status = DELIVERY_PENDING
 → delivery_step = RESULT_PENDING
-→ acknowledge next_offset
+→ CAS-ack next offset and release lease
 → deliver result to customer
 → DONE / COMPLETE
 ```
 
 Thus the data required for recovery exists before an inbound update becomes acknowledged.
 
-Non-durable conversational replies such as `/start`, help and access-denied messages acknowledge the offset after the corresponding Telegram send succeeds.
+Non-durable conversational replies such as `/start`, help and access-denied messages acknowledge the update only after the corresponding Telegram send succeeds.
 
 ## Task delivery state
 
@@ -85,7 +130,7 @@ A pending step describes the durable operation that still needs to finish.
 
 ## Two recovery layers
 
-Critical Telegram calls have short node-level retry:
+Critical Telegram sends have short node-level retry:
 
 ```text
 3 attempts
@@ -142,7 +187,11 @@ polling:  every 30 seconds ≈ 2,880 executions/day
 recovery: every 5 minutes  ≈   288 executions/day
 ```
 
-This trades a maximum normal inbound latency of roughly 30 seconds for a much lower idle execution count than the earlier 10-second polling version.
+An empty poll performs a small Data Table read plus one bounded Telegram request. An active processing lease makes overlapping scheduled polls terminate before making another Telegram request.
+
+## Delivery semantics limitation
+
+The task state machine prevents normal retries from losing source/result references. Telegram Bot API does not provide a generic idempotency key for `sendMessage`/`sendDocument`, so a rare ambiguous network failure where Telegram accepted a send but n8n never received the response cannot be made mathematically exactly-once. The design intentionally prefers recoverability over silent loss.
 
 ## Future automation
 
