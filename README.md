@@ -47,6 +47,8 @@ Create exactly:
 - `bt_bot_tasks`
 - `bt_bot_state`
 
+The workflow references these exact table names; no unprefixed `users`, `tasks`, or `bot_state` tables are expected.
+
 Use [`docs/data-model.md`](docs/data-model.md). Add this initial `bt_bot_state` row:
 
 ```text
