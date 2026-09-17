@@ -7,11 +7,29 @@ Record the n8n execution result and inspect the `users` / `tasks` Data Tables af
 ## Preconditions
 
 - workflow imported but not yet trusted as production;
-- Telegram credential selected on all Telegram nodes;
+- `TELEGRAM_BOT_TOKEN` is available to the n8n process;
+- Telegram credential selected on all Telegram action nodes;
 - `ADMIN_USER_ID` and `ADMIN_CHAT_ID` configured;
 - `users` and `tasks` Data Tables exist;
 - one test customer is available;
 - one small EPUB/PDF/DOCX/TXT source file and one translated/result file are available.
+
+## T00 — polling entrypoint
+
+1. Publish/activate the workflow.
+2. Send `/start` from the administrator account.
+3. Wait up to 10 seconds.
+
+Expected:
+
+- `Schedule Poll` starts executions every 5 seconds;
+- on the first polling execution the workflow successfully runs `Delete Telegram Webhook` once;
+- `Telegram getUpdates` receives the `/start` update;
+- `Expand Telegram Update` passes it to `Normalize + Config`;
+- administrator receives admin-mode guidance;
+- subsequent polling executions skip `Delete Telegram Webhook` and go directly to `Telegram getUpdates`.
+
+If `Telegram getUpdates` reports an environment-access error, verify that `TELEGRAM_BOT_TOKEN` is present in the n8n process and that node access to environment variables is allowed.
 
 ## T01 — unauthorized user
 
@@ -149,4 +167,4 @@ Expected:
 
 ## Acceptance gate
 
-Treat the MVP as locally verified only after T01–T09 and T11 pass on your actual n8n instance. T10 is a useful collision-path check but can be done with a disposable workflow copy.
+Treat the MVP as locally verified only after T00–T09 and T11 pass on your actual n8n instance. T10 is a useful collision-path check but can be done with a disposable workflow copy.
