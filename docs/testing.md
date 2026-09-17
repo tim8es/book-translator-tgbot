@@ -1,301 +1,194 @@
 # Manual test matrix
 
-Run `npm test` first, then test the imported workflow against your n8n instance and Telegram bot.
+Run `npm test` first, then test the imported workflow against local n8n and the Telegram bot.
 
 ## Preconditions
 
 - workflow imported and active;
-- n8n has a public HTTPS webhook URL;
-- Telegram Trigger uses the intended Telegram API credential;
-- all Telegram action nodes use the intended Telegram API credential;
-- **Admin Config** contains the local `ADMIN_USER_ID` and `ADMIN_CHAT_ID`;
-- `bt_bot_users` and `bt_bot_tasks` exist with the schema from `docs/data-model.md`;
+- no public URL is required;
+- **Bot Config** contains the local bot token and admin ID;
+- every Telegram send node has the intended Telegram API credential;
+- `bt_bot_users`, `bt_bot_tasks`, and `bt_bot_state` exist;
+- `bt_bot_state` contains `telegram_offset = 0` for a fresh test;
 - one active test customer exists;
-- one small supported source file is available;
-- `bt_bot_tasks` is empty or contains only rows you intentionally want to keep.
+- one small supported test document is available;
+- no webhook or second poller is active for the same bot.
 
-## T00 — webhook entrypoint
+## T00 — polling entrypoint
 
 1. Activate the workflow.
-2. Send `/start` from the administrator account.
+2. Send `/start` from admin.
 
 Expected:
 
-- `Telegram Trigger` receives the update without waiting for a polling interval;
-- admin receives exactly one admin-mode response;
-- no `bt_bot_state` table is read or written;
+- `Schedule Poll` picks up the message within the next polling cycles;
+- exactly one admin-mode response is sent;
+- `telegram_offset` advances past the update;
 - no task is created.
 
 ## T01 — unauthorized user
 
-Send `/start` from a customer absent from `bt_bot_users` or with `status = BLOCKED`.
+Send `/start` from a user absent from `bt_bot_users` or marked `BLOCKED`.
 
-Expected:
+Expected: one access-denied response, numeric Telegram ID shown, no task, then offset advances.
 
-- exactly one access-denied message;
-- message includes numeric Telegram ID;
-- no task is created.
-
-## T02 — whitelist activation
+## T02 — active user
 
 Add the customer with `status = ACTIVE`, then send `/start`.
 
-Expected:
-
-- exactly one access-confirmation message;
-- no task is created from `/start`.
+Expected: one access-confirmation response, no task, offset advances after the response succeeds.
 
 ## T03 — unsupported file
 
-Send an unsupported document such as `.zip`.
+Send a `.zip` or another unsupported document.
 
-Expected:
-
-- exactly one unsupported-format message;
-- no task row.
+Expected: one format-help response, no task, offset advances after the response succeeds.
 
 ## T04 — create one task
 
-Send one supported EPUB/PDF/DOCX/TXT document once.
+Send one EPUB/PDF/DOCX/TXT document.
 
 Expected in `bt_bot_tasks`:
 
-- exactly one new row;
-- `telegram_update_id` is populated;
-- `task_no` is six digits;
-- `source_file_id` and `source_filename` are populated;
-- `admin_chat_id`, `admin_task_text`, `source_caption` and `customer_confirmation_text` are persisted;
-- `retry_count = 0` initially;
-- after the full notification flow succeeds, `status = PROCESSING`;
-- after the full notification flow succeeds, `delivery_step = WAITING_RESULT`;
-- `next_retry_at` is empty/null while waiting for manual translation;
-- `admin_task_message_id` is populated.
+- exactly one row;
+- six-digit `task_no`;
+- `telegram_update_id`, `source_file_id`, filename and customer/admin IDs populated;
+- task is inserted before `bt_bot_state.telegram_offset` advances;
+- after notifications succeed: `status = PROCESSING`, `delivery_step = WAITING_RESULT`, `admin_task_message_id` populated.
 
-Expected customer result:
+Expected in Telegram:
 
-- exactly one confirmation;
-- it contains the same six-digit task number;
-- it contains `до 15 минут на каждые 10 000 знаков`.
+- admin receives one task card and one source document;
+- customer receives one confirmation with the same task number.
 
-Expected admin result:
+## T05 — duplicate inbound update
 
-- exactly one task card;
-- exactly one source document;
-- both use the same task number.
+Replay the exact same customer document update in a disposable test path without changing `update_id`.
 
-## T05 — duplicate Telegram update guard
+Expected: no second task row or task number; the duplicate path only advances the offset.
 
-Replay the exact same captured customer document update in a disposable workflow/test path.
+## T06 — admin result without replying to task card
 
-Expected:
+Send a result document directly as admin.
 
-- no second `bt_bot_tasks` row;
-- no second task number;
-- no duplicate admin/customer task notification.
-
-Do not alter the original `telegram_update_id` during this test.
-
-## T06 — admin document without task-card reply
-
-Send a result file directly to the bot as admin without replying to the task card.
-
-Expected:
-
-- one guidance message;
-- customer receives nothing;
-- task remains `PROCESSING / WAITING_RESULT`.
+Expected: guidance response; customer receives nothing; task remains `PROCESSING / WAITING_RESULT`.
 
 ## T07 — wrong reply target
 
 Reply with the result file to the source-document message instead of the task-card message.
 
-Expected:
-
-- task cannot be mapped;
-- customer receives nothing;
-- task remains `PROCESSING / WAITING_RESULT`.
+Expected: task cannot be mapped; customer receives nothing; original task stays waiting.
 
 ## T08 — successful completion
 
-Reply to the **task card** with the translated/result document.
+Reply to the task card with the translated document.
 
-Expected transition before customer delivery:
-
-```text
-translated_file_id = Telegram file_id from admin upload
-status = DELIVERY_PENDING
-delivery_step = RESULT_PENDING
-next_retry_at is populated
-```
-
-Expected after successful customer delivery:
-
-- customer receives exactly one result document;
-- caption contains the task number;
-- `status = DONE`;
-- `delivery_step = COMPLETE`;
-- `completed_at` is populated;
-- `next_retry_at` is empty/null;
-- admin receives one completion confirmation.
-
-## T09 — duplicate completion protection
-
-Reply to the same task card again with another document after the task is `DONE`.
-
-Expected:
-
-- bot reports that the task is already complete;
-- customer does not receive a second automatic result;
-- task remains `DONE / COMPLETE`.
-
-## T10 — immediate block
-
-Change customer status to `BLOCKED` and send another message.
-
-Expected:
-
-- access is denied on the next interaction;
-- no new task is created.
-
-## T11 — task-number collision path
-
-In a disposable workflow copy, force one generated candidate to an existing `task_no` and another candidate to an unused value.
-
-Expected:
-
-- existing number is rejected;
-- an unused six-digit number is selected;
-- no existing task is overwritten.
-
-## T12 — short network failure
-
-Temporarily cause a critical Telegram send to fail for less than the node retry window, then restore connectivity.
-
-Expected:
-
-- Telegram node retries automatically;
-- no duplicate task row is created;
-- the operation completes without waiting for scheduled recovery.
-
-## T13 — admin card delivery outage
-
-1. Make Telegram outbound delivery unavailable after the task row has been inserted but before the admin card succeeds.
-2. Keep the outage longer than the short node retry window.
-3. Restore connectivity.
-
-Expected while unavailable:
-
-```text
-status = NEW
-delivery_step = ADMIN_CARD_PENDING
-```
-
-Expected after a due recovery pass:
-
-- admin card is delivered;
-- `admin_task_message_id` is saved;
-- workflow proceeds to `SOURCE_PENDING` rather than creating a new task.
-
-## T14 — source delivery outage
-
-Cause the source-document send to admin to fail after the admin card has succeeded.
-
-Expected while unavailable:
-
-```text
-admin_task_message_id is populated
-delivery_step = SOURCE_PENDING
-```
-
-After recovery:
-
-- source file is delivered from saved `source_file_id`;
-- task advances to customer-confirmation step;
-- no new task/card is created.
-
-## T15 — customer confirmation outage
-
-Cause customer confirmation to fail after admin has received the source file.
-
-Expected while unavailable:
-
-```text
-delivery_step = CUSTOMER_CONFIRM_PENDING
-```
-
-After recovery:
-
-- saved `customer_confirmation_text` is delivered;
-- task becomes `PROCESSING / WAITING_RESULT`.
-
-## T16 — result delivery outage — critical acceptance test
-
-1. Complete a task normally up to `PROCESSING / WAITING_RESULT`.
-2. Make outbound Telegram delivery unavailable.
-3. Reply to the task card with a translated document.
-4. Let the immediate Telegram retries fail.
-
-Expected before connectivity is restored:
+Before customer delivery, verify:
 
 ```text
 translated_file_id is populated
 status = DELIVERY_PENDING
 delivery_step = RESULT_PENDING
-next_retry_at is populated
+telegram_offset has advanced past the admin upload
 ```
 
-The translated `file_id` must remain stored even though the customer has not received the file.
+After successful delivery:
 
-5. Restore connectivity.
-6. Wait until `next_retry_at` is due and a recovery run occurs.
+```text
+status = DONE
+delivery_step = COMPLETE
+completed_at is populated
+next_retry_at is empty/null
+```
+
+Customer should receive one result document and admin should receive completion confirmation.
+
+## T09 — duplicate completion protection
+
+Reply to the same task card again after `DONE`.
+
+Expected: bot reports already completed; no second automatic customer result.
+
+## T10 — blocked user takes effect immediately
+
+Change the active customer's status to `BLOCKED`, then send another message.
+
+Expected: access denied on the next interaction; no new task.
+
+## T11 — source delivery outage
+
+Force the Telegram source send to fail after the task row exists.
+
+Expected while unavailable:
+
+```text
+delivery_step = ADMIN_CARD_PENDING
+```
+
+or, if the card already succeeded:
+
+```text
+delivery_step = SOURCE_PENDING
+```
+
+After connectivity returns and recovery becomes due, delivery resumes from the persisted step without a new task.
+
+## T12 — result delivery outage — critical test
+
+1. Reach `PROCESSING / WAITING_RESULT`.
+2. Make outbound Telegram delivery unavailable.
+3. Admin replies to the task card with a translated document.
+4. Let immediate send retries fail.
+
+Expected before connectivity returns:
+
+```text
+translated_file_id is populated
+status = DELIVERY_PENDING
+delivery_step = RESULT_PENDING
+```
+
+Also verify `bt_bot_state.telegram_offset` has advanced past the admin upload. This proves the update was acknowledged only after its `file_id` became durable.
+
+Restore connectivity and wait until recovery is due.
+
+Expected: stored result is delivered without another admin upload, then task becomes `DONE / COMPLETE`.
+
+## T13 — restart safety
+
+Create a pending state such as `SOURCE_PENDING` or `RESULT_PENDING`, then restart n8n.
+
+Expected after restart: task state and Telegram `file_id` remain in Data Tables and recovery continues from the saved step.
+
+## T14 — recovery backoff
+
+Keep a pending delivery failing across recovery runs.
 
 Expected:
 
-- recovery sends the saved translated file to the original customer;
-- task becomes `DONE / COMPLETE`;
-- admin does not need to upload the translation again.
+- `retry_count` rises;
+- `next_retry_at` follows increasing backoff;
+- a task is not retried every 5-minute tick before its due time;
+- no more than 20 due tasks are selected per recovery run;
+- automatic persistent retry stops after 8 attempts.
 
-## T17 — n8n restart with pending delivery
+## T15 — idle behavior
 
-Create any durable pending state (`SOURCE_PENDING`, `CUSTOMER_CONFIRM_PENDING` or `RESULT_PENDING`), then restart n8n before delivery succeeds.
-
-Expected after n8n returns:
-
-- pending state is still present in `bt_bot_tasks`;
-- a later recovery run continues from the saved step;
-- original Telegram file references are reused;
-- no duplicate task is created.
-
-## T18 — recovery backoff
-
-Force a pending delivery to fail across multiple recovery runs.
+Leave the active workflow idle for at least 10 minutes.
 
 Expected:
 
-- `retry_count` increases;
-- `next_retry_at` moves forward using increasing backoff;
-- recovery does not retry the same task on every 5-minute tick while `next_retry_at` is still in the future;
-- no more than 20 due tasks are selected in one recovery run;
-- automatic retries stop after the configured cap of 8 attempts.
-
-## T19 — idle resource behavior
-
-Leave the bot idle for at least 10 minutes.
-
-Expected:
-
-- main Telegram flow has no executions caused by polling;
-- only scheduled recovery executions occur;
-- recovery exits quickly when there are no due pending tasks.
+- poll execution approximately every 30 seconds;
+- recovery execution every 5 minutes;
+- no Telegram webhook trigger executions;
+- empty polls terminate without creating tasks or changing the offset.
 
 ## Acceptance gate
 
-Treat the MVP as ready for normal local/limited use when:
+Treat the MVP as ready for local limited use when:
 
 - `npm test` passes;
 - T00–T10 pass;
-- T16 passes — translated file survives a delivery outage;
-- T17 passes — pending delivery survives an n8n restart;
-- T19 confirms there is no continuous 10-second polling.
-
-T11–T15 and T18 are recommended controlled resilience tests.
+- T12 proves result `file_id` survives a delivery outage;
+- T13 proves pending work survives an n8n restart;
+- T15 confirms the intended polling cadence.
