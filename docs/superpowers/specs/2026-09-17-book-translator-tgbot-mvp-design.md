@@ -16,8 +16,8 @@ Build a private Telegram bot backed by n8n for manually processed book-translati
 - Telegram `username` is metadata only and must never grant access.
 - The administrator is identified by numeric Telegram user/chat ID configured locally.
 - Use the Russian term **"Задача"**, not "Заказ".
-- User-facing task numbers are simple sequential integers: `1`, `2`, `3`, ...
-- Task number generation may use `max(task_no) + 1`; this is acceptable for the low-concurrency private MVP. A stronger allocator can replace it later without changing the user flow.
+- User-facing task numbers are random six-digit numeric IDs in the range `100000`–`999999`, for example `482731`.
+- Before inserting a task, the workflow must check that the generated `task_no` does not already exist in `tasks`. On collision, generate another six-digit number and retry.
 - MVP task statuses are `NEW`, `PROCESSING`, `DONE`, `REJECTED`.
 - Payments are outside the MVP state machine.
 - Do not automatically translate books in this version.
@@ -87,7 +87,7 @@ Rules:
 
 | Field | Type | Required | Purpose |
 | --- | --- | --- | --- |
-| `task_no` | number | yes | User-facing sequential task number |
+| `task_no` | number | yes | User-facing unique six-digit task number (`100000`–`999999`) |
 | `user_id` | number/string-safe integer | yes | Customer Telegram ID |
 | `customer_chat_id` | number/string-safe integer | yes | Chat to return the translated file to |
 | `username` | string | no | Customer username snapshot |
@@ -101,7 +101,8 @@ Rules:
 
 Rules:
 
-- `task_no` is unique.
+- `task_no` is unique and always exactly six digits.
+- Generate `task_no` randomly in `100000`–`999999` and verify uniqueness before insertion.
 - `admin_task_message_id` is the primary mapping key for admin completion replies.
 - A translated document may be delivered only when the replied-to admin message maps to exactly one non-DONE task.
 - Once delivery succeeds, store the translated `file_id`, set `status = DONE`, and set `completed_at`.
@@ -119,7 +120,7 @@ High-level routing:
 5. Reject customer updates unless `users.user_id` exists with `status = ACTIVE`.
 6. Handle `/start` separately from document submission.
 7. Validate source extension before task creation.
-8. Allocate next simple task number.
+8. Generate a random six-digit task number and verify that it is not already present in `tasks`; retry on collision.
 9. Insert task row as `NEW`.
 10. Send admin task card and capture its Telegram `message_id`.
 11. Update `admin_task_message_id`; set task to `PROCESSING`.
@@ -149,7 +150,7 @@ No task data is created.
 
 Response example:
 
-> Книга получена.\n\nЗадача #1\nФайл: book.epub\n\nЗадача передана на обработку. Готовый перевод придёт в этот чат.
+> Книга получена.\n\nЗадача #482731\nФайл: book.epub\n\nЗадача передана на обработку. Готовый перевод придёт в этот чат.
 
 ### Invalid source document
 
@@ -161,13 +162,13 @@ Response:
 
 Task card example:
 
-> 📚 Новая задача #1\n\nКлиент: @username\nUser ID: 123456789\nФайл: book.epub\nСтатус: PROCESSING\n\nКогда перевод будет готов, ответьте на это сообщение готовым файлом.
+> 📚 Новая задача #482731\n\nКлиент: @username\nUser ID: 123456789\nФайл: book.epub\nСтатус: PROCESSING\n\nКогда перевод будет готов, ответьте на это сообщение готовым файлом.
 
 The source document is sent immediately after the card.
 
 On successful translated-file delivery:
 
-> Задача #1 завершена. Файл отправлен клиенту.
+> Задача #482731 завершена. Файл отправлен клиенту.
 
 If the administrator sends a document without replying to a known task card:
 
@@ -179,6 +180,7 @@ If the mapped task is already `DONE`, do not resend automatically; tell the admi
 
 - Unauthorized updates must stop before any task-table mutation.
 - Missing document filename or unsupported extension must stop before task creation.
+- A `task_no` collision must never overwrite or reuse an existing task; generate a new six-digit number before insertion.
 - If admin notification fails after task insertion, keep the task in `NEW` so it is visibly incomplete in the table; n8n execution logs contain the failure.
 - Change task to `PROCESSING` only after the admin task card is successfully sent and its message ID stored.
 - Change task to `DONE` only after translated document delivery to the customer succeeds.
@@ -221,12 +223,13 @@ The repository must provide a repeatable validation path covering at least:
 1. Unauthorized user sends `/start` and is denied.
 2. Active user sends `/start` and is accepted.
 3. Active user sends unsupported file and no task is created.
-4. Active user sends supported book and receives a task number.
+4. Active user sends supported book and receives a unique six-digit task number.
 5. Administrator receives task card and source book.
 6. Administrator sends translated document without replying to task card and receives mapping error.
 7. Administrator replies to task card with translated document; customer receives file and task becomes `DONE`.
 8. Administrator repeats completion reply for a `DONE` task and no automatic duplicate delivery occurs.
 9. Blocking an existing user prevents their next interaction from creating a task.
+10. If a generated six-digit task number already exists, the workflow generates another number and does not create a duplicate.
 
 ## Out of scope for MVP
 
@@ -240,10 +243,10 @@ The repository must provide a repeatable validation path covering at least:
 - PostgreSQL/Supabase.
 - Web admin panel.
 - Public bot access.
-- Concurrency-safe global task-number allocator beyond the private low-volume assumption.
+- Strong distributed task-ID allocation beyond uniqueness checking in the private low-volume MVP.
 
 ## Future-compatible extension points
 
 The MVP deliberately keeps customer-facing interaction independent from translation execution. Later, the manual administrator step can be replaced with an automated pipeline that parses EPUB/PDF/DOCX/TXT, translates, performs QA, rebuilds the document and returns it through the same task record and Telegram delivery flow.
 
-If volume grows, migrate `users` and `tasks` from Data Tables to PostgreSQL and replace `max(task_no) + 1` with a database sequence while preserving the same `task_no` interface.
+If volume grows, migrate `users` and `tasks` from Data Tables to PostgreSQL while preserving the same six-digit user-facing `task_no` interface; an internal database primary key may be added separately if needed.
