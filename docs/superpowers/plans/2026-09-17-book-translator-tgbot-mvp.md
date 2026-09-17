@@ -24,10 +24,6 @@
 
 ### Task 1: Event-driven entrypoint
 
-**Files:**
-- Modify: `workflows/book-translator-mvp.json`
-- Modify: `scripts/validate-workflow.mjs`
-
 - [x] Replace continuous polling with Telegram Trigger.
 - [x] Remove `bt_bot_state` dependency.
 - [x] Validate that exported workflow contains no legacy polling nodes.
@@ -35,19 +31,11 @@
 
 ### Task 2: Durable delivery state
 
-**Files:**
-- Modify: `workflows/book-translator-mvp.json`
-- Modify: `docs/data-model.md`
-
-- [x] Persist `delivery_step`, `retry_count`, `retry_at`, and `last_error`.
-- [x] Persist recovery-safe message text/captions.
+- [x] Persist `delivery_step`, `retry_count`, and `next_retry_at`.
+- [x] Persist `admin_chat_id` and recovery-safe message text/captions.
 - [x] Move task through admin-card, source, customer-confirmation and waiting-result states.
 
 ### Task 3: Safe result delivery
-
-**Files:**
-- Modify: `workflows/book-translator-mvp.json`
-- Modify: `scripts/validate-workflow.mjs`
 
 - [x] Persist `translated_file_id` before delivery.
 - [x] Set `DELIVERY_PENDING / RESULT_PENDING` before the Telegram send.
@@ -56,44 +44,29 @@
 
 ### Task 4: Lightweight recovery
 
-**Files:**
-- Modify: `workflows/book-translator-mvp.json`
-- Modify: `scripts/validate-workflow.mjs`
-
 - [x] Add 5-minute recovery trigger.
 - [x] Recover only pending due tasks.
-- [x] Bound each recovery batch.
-- [x] Apply increasing retry backoff and retry cap.
+- [x] Bound each recovery batch to 20 tasks.
+- [x] Apply increasing retry backoff and an 8-attempt cap.
 - [x] Keep `WAITING_RESULT` and completed tasks out of recovery work.
 
 ### Task 5: Short Telegram retry
 
-**Files:**
-- Modify: `workflows/book-translator-mvp.json`
-- Modify: `scripts/validate-workflow.mjs`
-
-- [x] Add short `Retry On Fail` configuration to critical Telegram sends.
-- [x] Validate critical sends have retries configured.
+- [x] Add `Retry On Fail` to critical Telegram sends.
+- [x] Use at least 3 attempts with 5 seconds between attempts.
+- [x] Validate critical sends automatically.
 
 ### Task 6: Documentation and migration
 
-**Files:**
-- Modify: `README.md`
-- Modify: `docs/architecture.md`
-- Modify: `docs/data-model.md`
-- Modify: `docs/setup.md`
-- Modify: `docs/testing.md`
-- Modify: `examples/tasks.csv`
-- Remove: `examples/bot_state.csv`
-
 - [x] Document webhook/public HTTPS requirement.
-- [x] Document two-table schema and migration from polling version.
+- [x] Document the exact two-table schema and migration from polling version.
 - [x] Document network outage and n8n restart tests.
-- [x] Remove obsolete polling-state example.
+- [x] Remove obsolete `examples/bot_state.csv`.
+- [x] Remove temporary workflow-payload generation tooling.
 
 ### Task 7: Verification
 
 - [x] Run repository validator against generated workflow before commit.
 - [x] Confirm generated workflow passes validator in GitHub Actions.
-- [ ] Confirm clean final branch passes the regular validation workflow after temporary generation artifacts are removed.
-- [ ] Perform manual n8n/Telegram tests from `docs/testing.md` (owner/local environment).
+- [x] Confirm the clean branch passes the regular validation workflow after temporary generation artifacts are removed.
+- [ ] Perform manual n8n/Telegram acceptance tests from `docs/testing.md` in the owner's environment.
