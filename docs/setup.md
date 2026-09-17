@@ -18,14 +18,16 @@ Create:
 
 Use [`data-model.md`](data-model.md) for the exact schemas.
 
-`bt_bot_state` must contain this row before activation:
+Important for `bt_bot_state`:
 
 ```text
-key: telegram_offset
-value: 0
+key   String
+value String
 ```
 
-`examples/state.csv` contains the same initial value.
+You do **not** need to create an initial state row. On first run the workflow creates `telegram_state` automatically.
+
+If you created the older version where `value` was Number and the row was `telegram_offset = 0`, recreate/change `bt_bot_state.value` to String. The old `telegram_offset` row is ignored by the current workflow.
 
 ## 3. Import the workflow
 
@@ -47,8 +49,8 @@ Do not commit your locally edited workflow containing the real token.
 
 Why both token configuration and an n8n credential are needed:
 
-- polling uses a generic HTTP Request to Telegram `getUpdates`, so it reads the token from `Bot Config`;
-- outgoing Telegram nodes use the n8n Telegram API credential.
+- polling uses generic HTTP Request nodes for Telegram Bot API methods and reads the token from `Bot Config`;
+- outgoing Telegram message/document nodes use the n8n Telegram API credential.
 
 ## 5. Assign the Telegram credential
 
@@ -70,11 +72,7 @@ created_at: 2026-09-17T12:00:00.000Z
 
 Authorization uses `user_id`, not username.
 
-## 7. Make sure webhook mode is not active
-
-Telegram does not allow `getUpdates` while a webhook is registered for the same bot. If this bot was previously connected to a webhook-based workflow, clear that webhook first. Do not run the old webhook workflow and this polling workflow at the same time.
-
-## 8. Activate the workflow
+## 7. Activate the workflow
 
 The workflow has two scheduled entry points:
 
@@ -85,20 +83,51 @@ Recovery Schedule every 5 minutes
 
 No tunnel, reverse proxy, public domain, or public HTTPS endpoint is needed.
 
-The poll path reads one update at a time. `bt_bot_state.telegram_offset` advances only after a safe checkpoint, so a failed execution can retry the same inbound update instead of silently skipping it.
+### What happens automatically
+
+The workflow now handles two setup/runtime concerns itself:
+
+1. **Polling state initialization.** If `telegram_state` does not exist in `bt_bot_state`, it is created automatically.
+2. **Old Telegram webhook.** If `getUpdates` receives Telegram error `409`, the workflow calls `deleteWebhook` with `drop_pending_updates=false`. Queued updates remain available and polling continues on the next cycle.
+
+Do not deliberately run another poller or webhook workflow for the same bot at the same time.
+
+## 8. Poll serialization
+
+Before processing a fetched update, the workflow uses the single `telegram_state` row as a compare-and-set lease.
+
+```text
+read previous state
+→ create 120-second lease token
+→ update only if previous state is still unchanged
+→ only the execution that acquired the lease continues
+```
+
+A second overlapping poll cannot process the update while the lease is active. If an execution crashes, the lease expires automatically after 120 seconds and later polling may recover.
+
+The cursor is released/advanced only by an execution still owning that same lease.
 
 ## 9. Reliability behavior
 
-Critical Telegram operations use:
+Critical Telegram sends use:
 
 ```text
 3 attempts
 5 seconds between attempts
 ```
 
+`getUpdates` itself uses a shorter network policy:
+
+```text
+10-second HTTP timeout
+2 network attempts
+```
+
+This avoids n8n's long default HTTP timeout holding an idle poll execution for minutes.
+
 Longer delivery failures remain represented in `bt_bot_tasks` and are retried by the recovery path.
 
-For a customer source upload, the task row and `source_file_id` are saved before offset acknowledgement. For the administrator's translated file, `translated_file_id` and `RESULT_PENDING` are saved before offset acknowledgement.
+For a customer source upload, the task row and `source_file_id` are saved before cursor acknowledgement. For the administrator's translated file, `translated_file_id` and `RESULT_PENDING` are saved before cursor acknowledgement.
 
 ## 10. First test
 
@@ -121,9 +150,9 @@ At minimum verify:
 
 ## Troubleshooting
 
-### `getUpdates` reports a webhook conflict
+### First poll creates no state
 
-A webhook is still registered for the bot. Disable the old webhook integration before polling.
+Check that `bt_bot_state` exists and its `value` column is **String**. The row itself should be created automatically.
 
 ### Poll runs but receives nothing
 
@@ -131,9 +160,10 @@ Check:
 
 - workflow is active;
 - `Bot Config` uses the intended bot token;
-- `bt_bot_state` contains `telegram_offset`;
-- no other process is polling the same bot;
+- no other active process is continuously polling the same bot;
 - the Telegram bot itself receives the message.
+
+An old webhook does not require manual cleanup: a `409` response should route through `Telegram deleteWebhook` automatically.
 
 ### Sends fail while polling works
 
@@ -141,7 +171,11 @@ Polling and sending use different n8n mechanisms. Check the Telegram API credent
 
 ### Same task appears after a retry
 
-Inspect `telegram_update_id` and `bt_bot_state.telegram_offset`. A replay of the same document update should match the existing task and only acknowledge the offset, not create another row.
+Inspect `telegram_update_id` and `bt_bot_state.telegram_state`. A replay of the same customer document update should match the existing task and acknowledge it rather than creating another row.
+
+### Polling pauses after a failed execution
+
+Inspect `telegram_state.lockUntil`. The processing lease lasts up to 120 seconds. This pause is intentional: after expiry the next scheduled poll can recover the same unacknowledged update.
 
 ### Task stays pending
 
