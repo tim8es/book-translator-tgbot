@@ -55,6 +55,14 @@ if (!generateCode.includes('100000') || !generateCode.includes('900000')) {
   errors.push('Six-digit task-number generator is missing');
 }
 
+const customerConfirmation = byName.get('Confirm Task to Customer')?.parameters?.text ?? '';
+if (!customerConfirmation.includes("$('Pick Task Number').first().json.task_no")) {
+  errors.push('Customer confirmation must include the dynamic task number');
+}
+if (!customerConfirmation.includes('до 15 минут на каждые 10 000 знаков')) {
+  errors.push('Customer confirmation must include the translation-speed estimate');
+}
+
 const dataTableNodes = nodes.filter((node) => node.type === 'n8n-nodes-base.dataTable');
 const tableNames = new Set(dataTableNodes.map((node) => node.parameters?.dataTableId?.value));
 if (!tableNames.has('users') || !tableNames.has('tasks')) {
