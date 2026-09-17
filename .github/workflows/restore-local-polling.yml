@@ -1,0 +1,40 @@
+name: Restore local polling workflow
+
+on:
+  push:
+    branches:
+      - feat/mvp
+    paths:
+      - scripts/restore-local-polling.mjs
+
+permissions:
+  contents: write
+
+jobs:
+  restore:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout branch
+        uses: actions/checkout@v4
+        with:
+          ref: feat/mvp
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Restore polling workflow
+        run: node scripts/restore-local-polling.mjs
+
+      - name: Commit generated workflow
+        run: |
+          if git diff --quiet -- workflows/book-translator-mvp.json; then
+            echo "Workflow already up to date"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add workflows/book-translator-mvp.json
+          git commit -m "fix: restore safe local Telegram polling"
+          git push origin HEAD:feat/mvp
