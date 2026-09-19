@@ -4,249 +4,270 @@
 
 ## Goal
 
-Build a private Telegram bot backed by n8n for manually processed book-translation tasks. Only explicitly whitelisted Telegram users may use the bot. A user sends a book to the bot, the bot creates a numbered task, notifies the administrator and delivers the source file to the administrator. After manual translation, the administrator replies to the task with the translated file, and the bot returns that file to the original user.
+Build a private Telegram bot backed by local n8n for manually processed book-translation tasks. Only explicitly approved Telegram users may create translation tasks. Unknown users may submit an access request with `/start`; the request is stored as `PENDING` and requires manual administrator approval before access is granted. A customer sends a book, the bot creates a six-digit task and routes it to the administrator. The administrator later replies to the task card with the translated file and the bot returns it to the original customer.
 
-## MVP constraints
+## Architecture decision
 
-- Telegram is the only end-user interface.
-- n8n is the workflow runtime.
-- Use n8n Data Tables for persistent MVP state; no external database.
-- Do not store Telegram bot tokens or other secrets in Git.
-- Authorization is based only on immutable numeric Telegram `user_id` values.
-- Telegram `username` is metadata only and must never grant access.
-- The administrator is identified by numeric Telegram user/chat ID configured locally.
-- Use the Russian term **"Задача"**, not "Заказ".
-- User-facing task numbers are random six-digit numeric IDs in the range `100000`–`999999`, for example `482731`.
-- Before inserting a task, the workflow must check that the generated `task_no` does not already exist in `tasks`. On collision, generate another six-digit number and retry.
-- MVP task statuses are `NEW`, `PROCESSING`, `DONE`, `REJECTED`.
-- Payments are outside the MVP state machine.
-- Do not automatically translate books in this version.
-- Prefer reusing Telegram file IDs / Telegram-side message copying over downloading source books into n8n when possible.
+The MVP uses **Telegram polling through `getUpdates`**, not a webhook, because the target n8n instance has no public address.
 
-## User roles
+- `Schedule Poll` runs every 30 seconds.
+- `getUpdates` reads one update at a time (`limit=1`).
+- `bt_bot_state.telegram_state` stores the polling cursor and processing lease as JSON.
+- The polling state row is created automatically if missing.
+- A compare-and-set lease serializes overlapping poll executions.
+- A stale lease expires after 120 seconds so a crashed execution cannot deadlock the bot.
+- Telegram webhook conflict `409` is handled automatically with `deleteWebhook(drop_pending_updates=false)`.
+- `bt_bot_tasks` stores business state and recovery state.
+- Source and result documents are referenced by Telegram `file_id` values.
+- Critical Telegram sends use short built-in retries.
+- A recovery schedule runs every 5 minutes for due pending deliveries.
+- No Redis, RabbitMQ, PostgreSQL or external object storage is required for the MVP.
 
-### Customer
+No public domain, HTTPS webhook, tunnel or reverse proxy is required.
 
-A Telegram user whose numeric `user_id` exists in the `users` Data Table with `status = ACTIVE`.
+## Authorization and access requests
 
-The customer can:
+Customer authorization uses numeric Telegram `user_id` in `bt_bot_users`. Username and display name are metadata only.
 
-- run `/start`;
-- receive access confirmation;
-- send one supported book document per task;
-- receive a confirmation containing the created task number;
-- receive the translated document when the task is completed.
+Allowed user statuses:
 
-A non-whitelisted or blocked user receives a short access-denied response and no task is created.
+```text
+PENDING
+ACTIVE
+BLOCKED
+REJECTED
+```
 
-### Administrator
+Behavior:
 
-A single administrator identified by configured numeric Telegram ID for the MVP.
+- `ACTIVE` — may use the customer translation flow;
+- `PENDING` — access request exists but no translation task may be created;
+- `BLOCKED` — access is denied;
+- `REJECTED` — reviewed application is denied;
+- missing user + `/start` — create exactly one `PENDING` row and notify the administrator;
+- missing user + any other input — do not create a row; instruct the user to send `/start`.
 
-The administrator receives:
+The administrator approves manually by changing `PENDING → ACTIVE` in `bt_bot_users`. The bot must not automatically grant access.
 
-- a task card with task number, customer metadata and source filename;
-- the source book document;
-- confirmation after a translated file has been delivered to the customer;
-- an error message when an admin reply cannot be mapped to a task.
-
-To complete a task, the administrator replies to the task card with the translated document. The bot maps the replied-to Telegram message ID to the stored task and sends the uploaded translated file back to that task's customer.
+The administrator is identified by numeric `ADMIN_USER_ID` in `Bot Config`. `ADMIN_CHAT_ID` may fall back to the same value for a private bot conversation.
 
 ## Supported source files
-
-For the MVP the bot accepts Telegram documents with these filename extensions:
 
 - `.epub`
 - `.pdf`
 - `.docx`
 - `.txt`
 
-Unsupported documents receive a validation message and do not create a task.
+Unsupported files do not create tasks.
 
-The workflow should avoid downloading the source document solely for forwarding. The source Telegram `file_id` is stored and reused where n8n/Telegram permits it.
+## Task numbering
 
-## Data model
+User-facing task numbers are random six-digit integers from `100000` through `999999`. Multiple candidates are generated and values already present in `bt_bot_tasks` are rejected.
 
-### `users` Data Table
+`telegram_update_id` is stored separately as an inbound duplicate guard.
 
-| Field | Type | Required | Purpose |
-| --- | --- | --- | --- |
-| `user_id` | number/string-safe integer | yes | Stable Telegram identity and authorization key |
-| `username` | string | no | Current Telegram username for admin readability |
-| `name` | string | no | Human-readable name |
-| `status` | string | yes | `ACTIVE` or `BLOCKED` |
-| `created_at` | datetime/string | yes | When whitelist entry was created |
+## Polling state
 
-Rules:
+`bt_bot_state` has two columns:
 
-- `user_id` must be unique.
-- The workflow checks this table on every customer message, not only `/start`.
-- Changing `status` to `BLOCKED` immediately removes access on the next interaction.
+```text
+key   String
+value String
+```
 
-### `tasks` Data Table
+The workflow owns one row:
 
-| Field | Type | Required | Purpose |
-| --- | --- | --- | --- |
-| `task_no` | number | yes | User-facing unique six-digit task number (`100000`–`999999`) |
-| `user_id` | number/string-safe integer | yes | Customer Telegram ID |
-| `customer_chat_id` | number/string-safe integer | yes | Chat to return the translated file to |
-| `username` | string | no | Customer username snapshot |
-| `source_file_id` | string | yes | Telegram file ID for source book |
-| `source_filename` | string | yes | Original filename |
-| `translated_file_id` | string | no | Telegram file ID uploaded by admin |
-| `status` | string | yes | `NEW`, `PROCESSING`, `DONE`, `REJECTED` |
-| `admin_task_message_id` | number | yes after notification | Telegram message ID of admin task card |
-| `created_at` | datetime/string | yes | Task creation time |
-| `completed_at` | datetime/string | no | Delivery completion time |
+```text
+key = telegram_state
+value = {"offset":0,"lockToken":"","lockUntil":0}
+```
 
-Rules:
+The row is auto-created on first use.
 
-- `task_no` is unique and always exactly six digits.
-- Generate `task_no` randomly in `100000`–`999999` and verify uniqueness before insertion.
-- `admin_task_message_id` is the primary mapping key for admin completion replies.
-- A translated document may be delivered only when the replied-to admin message maps to exactly one non-DONE task.
-- Once delivery succeeds, store the translated `file_id`, set `status = DONE`, and set `completed_at`.
+Before processing a fetched update, the workflow attempts a compare-and-set update from the exact previously-read JSON value to a leased value containing a random `lockToken` and a `lockUntil` timestamp 120 seconds in the future. Only the execution that successfully updates that exact value continues into business logic.
 
-## Workflow architecture
+Acknowledgement also uses compare-and-set against the exact lease value owned by that execution. A stale execution cannot overwrite newer polling state.
 
-Use one main n8n workflow with one Telegram Trigger so only one Telegram webhook/trigger owns the bot update stream.
+## Safe polling acknowledgement
 
-High-level routing:
+The Telegram offset must never be advanced before the data required to recover the inbound update is durable.
 
-1. Telegram Trigger receives update.
-2. Normalize update into sender ID, chat ID, text, document metadata and reply metadata.
-3. If sender is administrator, route to admin handler.
-4. Otherwise route to customer authorization lookup.
-5. Reject customer updates unless `users.user_id` exists with `status = ACTIVE`.
-6. Handle `/start` separately from document submission.
-7. Validate source extension before task creation.
-8. Generate a random six-digit task number and verify that it is not already present in `tasks`; retry on collision.
-9. Insert task row as `NEW`.
-10. Send admin task card and capture its Telegram `message_id`.
-11. Update `admin_task_message_id`; set task to `PROCESSING`.
-12. Send/copy source document to admin.
-13. Confirm created task number to customer.
-14. For administrator document replies, find task by `reply_to_message.message_id = admin_task_message_id`.
-15. Send the administrator's document to `customer_chat_id` using its Telegram `file_id`.
-16. Mark task `DONE` only after the customer delivery call succeeds.
+Customer source upload:
 
-## Customer UX
+```text
+receive Telegram update
+→ acquire processing lease
+→ authorize + duplicate check
+→ persist task row including source_file_id
+→ persist next Telegram offset and release lease
+→ deliver task card/source/customer confirmation
+```
 
-### `/start` for active user
+If the same source update is replayed after task persistence but before cursor persistence, `telegram_update_id` detects the existing task and the duplicate path only acknowledges the update.
 
-Response:
+Administrator result upload:
 
-> Доступ подтверждён.\n\nОтправьте книгу файлом EPUB, PDF, DOCX или TXT. После получения я создам задачу и пришлю готовый перевод сюда.
+```text
+receive translated file
+→ acquire processing lease
+→ resolve task from replied task-card message
+→ persist translated_file_id
+→ status = DELIVERY_PENDING
+→ delivery_step = RESULT_PENDING
+→ persist next Telegram offset and release lease
+→ deliver result to customer
+```
 
-### `/start` or any message for unauthorized user
+A first access request persists the `PENDING` user row before outbound notifications. After the admin notification succeeds, `request_notified_at` is stored; then the customer confirmation is sent and the update is acknowledged. If the notification was not confirmed, replay may retry it without inserting a duplicate user row.
 
-Response:
+Other simple conversational interactions such as active-user `/start`, help, pending-state and access-denied replies acknowledge the update only after the response send succeeds.
 
-> Доступ к боту закрыт. Обратитесь к администратору, чтобы получить доступ.
+## Webhook conflict recovery
 
-No task data is created.
+`getUpdates` exposes the full Telegram API response instead of treating non-2xx as an opaque node failure. If Telegram reports `409`, the workflow calls:
 
-### Valid source document
+```text
+deleteWebhook(drop_pending_updates=false)
+```
 
-Response example:
+No cursor is advanced by the conflict. Telegram's pending updates are preserved and the next polling cycle retries the same cursor.
 
-> Книга получена.\n\nЗадача #482731\nФайл: book.epub\n\nЗадача передана на обработку. Готовый перевод придёт в этот чат.
+## Durable task state
 
-### Invalid source document
+Task status values:
 
-Response:
+```text
+NEW
+PROCESSING
+DELIVERY_PENDING
+DONE
+REJECTED
+```
 
-> Этот формат пока не поддерживается. Отправьте EPUB, PDF, DOCX или TXT.
+Delivery states:
 
-## Administrator UX
+```text
+ADMIN_CARD_PENDING
+SOURCE_PENDING
+CUSTOMER_CONFIRM_PENDING
+WAITING_RESULT
+RESULT_PENDING
+COMPLETE
+```
 
-Task card example:
+Normal flow:
 
-> 📚 Новая задача #482731\n\nКлиент: @username\nUser ID: 123456789\nФайл: book.epub\nСтатус: PROCESSING\n\nКогда перевод будет готов, ответьте на это сообщение готовым файлом.
+```text
+NEW / ADMIN_CARD_PENDING
+→ NEW / SOURCE_PENDING
+→ NEW / CUSTOMER_CONFIRM_PENDING
+→ PROCESSING / WAITING_RESULT
+→ DELIVERY_PENDING / RESULT_PENDING
+→ DONE / COMPLETE
+```
 
-The source document is sent immediately after the card.
+## Critical translated-file guarantee
 
-On successful translated-file delivery:
+`translated_file_id` and `RESULT_PENDING` are persisted before customer delivery and before the admin upload update is acknowledged. A temporary outbound failure therefore does not require the administrator to upload the translation again.
 
-> Задача #482731 завершена. Файл отправлен клиенту.
+Only a successful customer Telegram send may advance the task to `DONE / COMPLETE`.
 
-If the administrator sends a document without replying to a known task card:
+## Recovery
 
-> Не удалось определить задачу. Ответьте готовым файлом именно на сообщение с карточкой задачи.
+`Recovery Schedule` runs every 5 minutes and considers only:
 
-If the mapped task is already `DONE`, do not resend automatically; tell the administrator it is already completed.
+```text
+ADMIN_CARD_PENDING
+SOURCE_PENDING
+CUSTOMER_CONFIRM_PENDING
+RESULT_PENDING
+```
 
-## Error handling and idempotency
+At most 20 due tasks are selected per run. Automatic persistent recovery is capped at 8 attempts with:
 
-- Unauthorized updates must stop before any task-table mutation.
-- Missing document filename or unsupported extension must stop before task creation.
-- A `task_no` collision must never overwrite or reuse an existing task; generate a new six-digit number before insertion.
-- If admin notification fails after task insertion, keep the task in `NEW` so it is visibly incomplete in the table; n8n execution logs contain the failure.
-- Change task to `PROCESSING` only after the admin task card is successfully sent and its message ID stored.
-- Change task to `DONE` only after translated document delivery to the customer succeeds.
-- Admin replies to completed tasks do not automatically redeliver the document.
-- Unknown customer text should return usage guidance rather than create a task.
-- Unknown admin messages should be ignored or return minimal admin guidance; they must not affect customer data.
+```text
+5 min → 15 min → 30 min → 1 h → 3 h → 6 h → 12 h → 24 h
+```
 
-## Configuration and secrets
+`WAITING_RESULT` and `COMPLETE` are not recovery work.
 
-Repository files may contain placeholders and setup instructions but no actual secrets.
+## Persisted recovery material
 
-Local setup requires:
+Each task stores enough context to resume after an n8n restart:
 
-- Telegram Bot credential in n8n (`TELEGRAM_BOT_TOKEN` conceptually; preferably stored as an n8n credential rather than plain workflow JSON).
-- `ADMIN_USER_ID` / admin chat ID configured locally.
-- `users` and `tasks` Data Tables created with the documented schema.
-- At least one `ACTIVE` whitelist row for testing.
+```text
+customer_chat_id
+admin_chat_id
+admin_task_message_id
+admin_task_text
+source_file_id
+source_caption
+customer_confirmation_text
+translated_file_id
+delivery_step
+retry_count
+next_retry_at
+```
 
-An `.env.example` may document variable names, but `.env` must be ignored.
+## Secrets and configuration
 
-## Repository deliverables
+- The committed workflow contains only a bot-token placeholder.
+- The real bot token is filled locally in `Bot Config` for Bot API HTTP requests.
+- The same bot token is stored in an n8n Telegram API credential for outgoing Telegram nodes.
+- The export contains no real bot token and no credential binding.
+- Real administrator IDs are configured locally.
 
-After implementation the repository should contain at minimum:
+## Resource profile
 
-- `README.md` — purpose, quick start and local test flow.
-- `.gitignore` — ignores local secrets and temporary files.
-- `.env.example` — non-secret configuration example.
-- `workflows/book-translator-mvp.json` — importable n8n workflow without credentials/secrets.
-- `docs/setup.md` — detailed n8n + Telegram setup.
-- `docs/data-model.md` — exact Data Table schemas.
-- `docs/testing.md` — end-to-end manual MVP test matrix.
-- `docs/architecture.md` — flow and future migration notes.
-- `examples/users.csv` — example whitelist rows without real personal IDs.
-- `examples/tasks.csv` — illustrative task rows.
+Idle scheduled executions are approximately:
 
-## Testing requirements
+```text
+polling every 30 seconds ≈ 2,880/day
+recovery every 5 minutes ≈ 288/day
+```
 
-The repository must provide a repeatable validation path covering at least:
+`getUpdates` uses an explicit 10-second HTTP timeout and two network attempts. This avoids a transient connection problem holding a polling execution for the much longer generic HTTP-node default timeout.
 
-1. Unauthorized user sends `/start` and is denied.
-2. Active user sends `/start` and is accepted.
-3. Active user sends unsupported file and no task is created.
-4. Active user sends supported book and receives a unique six-digit task number.
-5. Administrator receives task card and source book.
-6. Administrator sends translated document without replying to task card and receives mapping error.
-7. Administrator replies to task card with translated document; customer receives file and task becomes `DONE`.
-8. Administrator repeats completion reply for a `DONE` task and no automatic duplicate delivery occurs.
-9. Blocking an existing user prevents their next interaction from creating a task.
-10. If a generated six-digit task number already exists, the workflow generates another number and does not create a duplicate.
+## Delivery semantics
 
-## Out of scope for MVP
+Normal duplicate task creation is guarded by `telegram_update_id`, durable cursor acknowledgement and the polling lease.
 
-- Payments and payment verification.
-- Automatic text extraction or translation.
-- Pricing by character count.
-- Multiple administrators / role management.
-- Customer task history UI.
-- Cancellation workflow.
-- External object storage.
-- PostgreSQL/Supabase.
-- Web admin panel.
-- Public bot access.
-- Strong distributed task-ID allocation beyond uniqueness checking in the private low-volume MVP.
+Telegram Bot API does not expose a generic exactly-once idempotency key for ordinary `sendMessage` / `sendDocument` calls. In the rare ambiguous case where Telegram accepted an outbound send but the network response was lost before n8n could persist the next state, a retry can duplicate that outbound message. The design chooses recoverability and possible duplicate delivery over silent data loss.
 
-## Future-compatible extension points
+## Acceptance requirements
 
-The MVP deliberately keeps customer-facing interaction independent from translation execution. Later, the manual administrator step can be replaced with an automated pipeline that parses EPUB/PDF/DOCX/TXT, translates, performs QA, rebuilds the document and returns it through the same task record and Telegram delivery flow.
+The MVP is acceptable when:
 
-If volume grows, migrate `users` and `tasks` from Data Tables to PostgreSQL while preserving the same six-digit user-facing `task_no` interface; an internal database primary key may be added separately if needed.
+1. unknown `/start` creates one `PENDING` access row and notifies the administrator;
+2. repeated notified `PENDING` `/start` does not create another row or normal duplicate admin notification;
+3. manual `PENDING → ACTIVE` approval enables the customer flow;
+4. blocked/rejected users remain denied;
+5. supported-file behavior works;
+6. polling state initializes itself;
+7. overlapping poll executions are serialized by the lease;
+8. abandoned lease expires and processing recovers;
+9. old webhook conflict self-heals without dropping queued updates;
+10. one source upload creates exactly one task;
+11. task persistence occurs before cursor acknowledgement;
+12. admin receives task card and source file;
+13. administrator reply maps to the correct task;
+14. translated `file_id` and `RESULT_PENDING` are stored before result-update acknowledgement;
+15. result delivery failure remains recoverable after network restoration or n8n restart;
+16. recovery applies bounded retry/backoff;
+17. no public URL is needed;
+18. repository validation passes;
+19. manual n8n/Telegram acceptance tests pass in the owner's environment.
+
+## Out of scope
+
+- payments;
+- automatic translation;
+- text extraction and pricing;
+- multiple administrators;
+- customer task-history UI;
+- cancellation UI;
+- external object storage;
+- Redis/RabbitMQ;
+- PostgreSQL/Supabase;
+- public bot access;
+- mathematically exactly-once Telegram outbound delivery.
