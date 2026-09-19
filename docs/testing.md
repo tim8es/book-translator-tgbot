@@ -10,7 +10,9 @@ Run `npm test` first, then test the imported workflow against local n8n and the 
 - every Telegram send node has the intended Telegram API credential;
 - `bt_bot_users`, `bt_bot_tasks`, and `bt_bot_state` exist;
 - `bt_bot_state` has `key` = String and `value` = String; no initial row is required;
+- one Telegram account absent from `bt_bot_users` is available for access-request tests;
 - one active test customer exists;
+- `bt_bot_users` includes the optional Date column `request_notified_at`;
 - one small supported test document is available;
 - no intentionally running second bot consumer exists.
 
@@ -39,17 +41,56 @@ Expected:
 - the state ends unlocked (`lockToken` empty and `lockUntil = 0`);
 - no task is created.
 
-## T02 — unauthorized user
+## T02 — new user creates an access request
 
-Send `/start` from a user absent from `bt_bot_users` or marked `BLOCKED`.
+Send `/start` from a user absent from `bt_bot_users`.
 
-Expected: one access-denied response, numeric Telegram ID shown, no task, then cursor advances.
+Expected in `bt_bot_users`:
+
+- exactly one row is inserted for that numeric `user_id`;
+- `status = PENDING`;
+- username/name metadata is captured when Telegram provides it;
+- `created_at` is populated;
+- after successful admin notification, `request_notified_at` is populated.
+
+Expected in Telegram:
+
+- administrator receives one access-request message containing name, username and numeric user ID;
+- customer receives confirmation that the request was sent;
+- no translation task is created.
+
+## T02A — repeat pending request
+
+Send `/start` again from the same user while the row is still `PENDING` and `request_notified_at` is populated.
+
+Expected:
+
+- no second `bt_bot_users` row;
+- no normal duplicate admin request notification;
+- customer receives the "already awaiting review" response;
+- no translation task is created.
+
+## T02B — missing user sends something other than /start
+
+Use another user absent from `bt_bot_users` and send text or a document without first sending `/start`.
+
+Expected:
+
+- no user row is inserted;
+- no task is created;
+- bot instructs the user to send `/start` to request access.
 
 ## T03 — active user
 
-Add the customer with `status = ACTIVE`, then send `/start`.
+Change the pending test user's `status` to `ACTIVE`, then send `/start`.
 
 Expected: one access-confirmation response, no task, cursor advances only after the response succeeds.
+
+## T03A — rejected or blocked user
+
+Set the test user's status to `REJECTED` or `BLOCKED`, then send another message.
+
+Expected: access denied immediately; no task and no new access-request row.
 
 ## T04 — unsupported file
 
