@@ -4,7 +4,7 @@
 
 ## Goal
 
-Build a private Telegram bot backed by local n8n for manually processed book-translation tasks. Only explicitly whitelisted Telegram users may use it. A customer sends a book, the bot creates a six-digit task and routes it to the administrator. The administrator later replies to the task card with the translated file and the bot returns it to the original customer.
+Build a private Telegram bot backed by local n8n for manually processed book-translation tasks. Only explicitly approved Telegram users may create translation tasks. Unknown users may submit an access request with `/start`; the request is stored as `PENDING` and requires manual administrator approval before access is granted. A customer sends a book, the bot creates a six-digit task and routes it to the administrator. The administrator later replies to the task card with the translated file and the bot returns it to the original customer.
 
 ## Architecture decision
 
@@ -25,9 +25,29 @@ The MVP uses **Telegram polling through `getUpdates`**, not a webhook, because t
 
 No public domain, HTTPS webhook, tunnel or reverse proxy is required.
 
-## Authorization
+## Authorization and access requests
 
-Customer access uses numeric Telegram `user_id` in `bt_bot_users` with `status = ACTIVE`. Username is metadata only.
+Customer authorization uses numeric Telegram `user_id` in `bt_bot_users`. Username and display name are metadata only.
+
+Allowed user statuses:
+
+```text
+PENDING
+ACTIVE
+BLOCKED
+REJECTED
+```
+
+Behavior:
+
+- `ACTIVE` — may use the customer translation flow;
+- `PENDING` — access request exists but no translation task may be created;
+- `BLOCKED` — access is denied;
+- `REJECTED` — reviewed application is denied;
+- missing user + `/start` — create exactly one `PENDING` row and notify the administrator;
+- missing user + any other input — do not create a row; instruct the user to send `/start`.
+
+The administrator approves manually by changing `PENDING → ACTIVE` in `bt_bot_users`. The bot must not automatically grant access.
 
 The administrator is identified by numeric `ADMIN_USER_ID` in `Bot Config`. `ADMIN_CHAT_ID` may fall back to the same value for a private bot conversation.
 
@@ -98,7 +118,9 @@ receive translated file
 → deliver result to customer
 ```
 
-Simple conversational interactions such as `/start`, help and access-denied replies acknowledge the update only after the response send succeeds.
+A first access request persists the `PENDING` user row before outbound notifications. After the admin notification succeeds, `request_notified_at` is stored; then the customer confirmation is sent and the update is acknowledged. If the notification was not confirmed, replay may retry it without inserting a duplicate user row.
+
+Other simple conversational interactions such as active-user `/start`, help, pending-state and access-denied replies acknowledge the update only after the response send succeeds.
 
 ## Webhook conflict recovery
 
@@ -216,21 +238,25 @@ Telegram Bot API does not expose a generic exactly-once idempotency key for ordi
 
 The MVP is acceptable when:
 
-1. whitelist and supported-file behavior works;
-2. polling state initializes itself;
-3. overlapping poll executions are serialized by the lease;
-4. abandoned lease expires and processing recovers;
-5. old webhook conflict self-heals without dropping queued updates;
-6. one source upload creates exactly one task;
-7. task persistence occurs before cursor acknowledgement;
-8. admin receives task card and source file;
-9. administrator reply maps to the correct task;
-10. translated `file_id` and `RESULT_PENDING` are stored before result-update acknowledgement;
-11. result delivery failure remains recoverable after network restoration or n8n restart;
-12. recovery applies bounded retry/backoff;
-13. no public URL is needed;
-14. repository validation passes;
-15. manual n8n/Telegram acceptance tests pass in the owner's environment.
+1. unknown `/start` creates one `PENDING` access row and notifies the administrator;
+2. repeated notified `PENDING` `/start` does not create another row or normal duplicate admin notification;
+3. manual `PENDING → ACTIVE` approval enables the customer flow;
+4. blocked/rejected users remain denied;
+5. supported-file behavior works;
+6. polling state initializes itself;
+7. overlapping poll executions are serialized by the lease;
+8. abandoned lease expires and processing recovers;
+9. old webhook conflict self-heals without dropping queued updates;
+10. one source upload creates exactly one task;
+11. task persistence occurs before cursor acknowledgement;
+12. admin receives task card and source file;
+13. administrator reply maps to the correct task;
+14. translated `file_id` and `RESULT_PENDING` are stored before result-update acknowledgement;
+15. result delivery failure remains recoverable after network restoration or n8n restart;
+16. recovery applies bounded retry/backoff;
+17. no public URL is needed;
+18. repository validation passes;
+19. manual n8n/Telegram acceptance tests pass in the owner's environment.
 
 ## Out of scope
 

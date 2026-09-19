@@ -106,7 +106,7 @@ Telegram result update
 
 Thus the data required for recovery exists before an inbound update becomes acknowledged.
 
-Non-durable conversational replies such as `/start`, help and access-denied messages acknowledge the update only after the corresponding Telegram send succeeds.
+Non-durable conversational replies such as active-user `/start`, help and access-denied messages acknowledge the update only after the corresponding Telegram send succeeds. A first access request is different: its `PENDING` user row is persisted before notification/confirmation, so the application itself is not lost.
 
 ## Task delivery state
 
@@ -156,17 +156,39 @@ translated_file_id
 
 Source and result documents can therefore be forwarded without storing book binaries in n8n solely for routing.
 
-## Authorization
+## Authorization and access requests
 
-Customer authorization:
+`bt_bot_users` is both the authorization registry and the access-request queue.
 
 ```text
 message.from.id
-→ bt_bot_users.user_id
-→ status = ACTIVE
+→ lookup bt_bot_users.user_id
+   ├─ ACTIVE   → normal customer flow
+   ├─ PENDING  → request is waiting; no task creation
+   ├─ BLOCKED  → deny
+   ├─ REJECTED → deny
+   └─ missing
+        ├─ /start → insert PENDING + notify admin
+        └─ other  → ask user to send /start
 ```
 
-Username is metadata only.
+For a new request the durable order is:
+
+```text
+insert PENDING row
+→ send admin request notification
+→ set request_notified_at
+→ confirm request to customer
+→ acknowledge Telegram offset
+```
+
+Because the row is inserted first, the administrator can still see the application in `bt_bot_users` even if a later Telegram send fails. If the admin notification was not confirmed, `request_notified_at` remains empty and a replay can retry that notification.
+
+Once `request_notified_at` is populated, repeated `/start` from the same `PENDING` user returns the pending-state message without creating another row or normal duplicate admin notification.
+
+Approval is intentionally manual for the MVP: the administrator changes `status` from `PENDING` to `ACTIVE` in the Data Table. No Telegram command automatically grants access.
+
+Username and name are display metadata only. Authorization always uses numeric Telegram `user_id`.
 
 Administrator authorization uses numeric `ADMIN_USER_ID` from `Bot Config`. In a private bot chat `ADMIN_CHAT_ID` normally resolves to the same ID.
 

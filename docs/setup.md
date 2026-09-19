@@ -58,9 +58,38 @@ Assign the same Telegram API credential to every Telegram Send Message / Send Do
 
 There is no Telegram Trigger node in this version.
 
-## 6. Add allowed customers
+## 6. Configure customer access
 
-Add rows to `bt_bot_users` manually. Example:
+You no longer need to pre-add every potential customer.
+
+For a new Telegram user:
+
+```text
+/start
+→ bot inserts bt_bot_users row with status = PENDING
+→ administrator receives name / username / user_id
+→ user receives "request sent"
+```
+
+To approve the request, open `bt_bot_users` and change only:
+
+```text
+status: PENDING → ACTIVE
+```
+
+On the user's next `/start` or message, access is granted.
+
+To deny or revoke access, use `REJECTED` or `BLOCKED`. Both are denied by the workflow. `BLOCKED` is useful for previously active users; `REJECTED` is useful for reviewed applications that should not be approved.
+
+The table must include the optional Date column:
+
+```text
+request_notified_at
+```
+
+The workflow fills it after the admin notification for a new request succeeds. A `PENDING` row with an empty `request_notified_at` can retry the notification if the original Telegram update is replayed.
+
+You may still pre-seed trusted users manually:
 
 ```text
 user_id: 111111111
@@ -68,9 +97,10 @@ username: example_user
 name: Example User
 status: ACTIVE
 created_at: 2026-09-17T12:00:00.000Z
+request_notified_at: 2026-09-17T12:00:05.000Z
 ```
 
-Authorization uses `user_id`, not username.
+Authorization uses numeric `user_id`, not username.
 
 ## 7. Activate the workflow
 
@@ -141,12 +171,14 @@ Then use [`testing.md`](testing.md) and a small `.txt` or `.pdf` test document.
 
 At minimum verify:
 
-1. `/start` from admin, active customer and unauthorized customer;
-2. one supported upload creates exactly one six-digit task;
-3. admin receives task card and source document;
-4. replying to the task card with a result reaches the original customer;
-5. task finishes at `DONE / COMPLETE`;
-6. a failed result delivery leaves `translated_file_id` stored in `RESULT_PENDING` for recovery.
+1. `/start` from a brand-new customer creates exactly one `PENDING` access row and one admin notification;
+2. repeating `/start` while still `PENDING` does not create a duplicate row or normal duplicate admin notification;
+3. changing that row to `ACTIVE` enables normal customer access;
+4. one supported upload creates exactly one six-digit task;
+5. admin receives task card and source document;
+6. replying to the task card with a result reaches the original customer;
+7. task finishes at `DONE / COMPLETE`;
+8. a failed result delivery leaves `translated_file_id` stored in `RESULT_PENDING` for recovery.
 
 ## Troubleshooting
 
@@ -180,3 +212,12 @@ Inspect `telegram_state.lockUntil`. The processing lease lasts up to 120 seconds
 ### Task stays pending
 
 Inspect `delivery_step`, `retry_count`, `next_retry_at`, and the Recovery Schedule execution log. A future `next_retry_at` means bounded backoff is working.
+
+
+### Access request is visible in the table but no admin message arrived
+
+Open the user's `bt_bot_users` row.
+
+- `status = PENDING` means the request itself was persisted successfully.
+- Empty `request_notified_at` means the admin notification was not confirmed.
+- A replay of the unacknowledged update can retry that notification; regardless, the `PENDING` row remains visible for manual review.

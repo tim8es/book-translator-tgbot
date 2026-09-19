@@ -1,3 +1,5 @@
-user_id,username,name,status,created_at
-111111111,example_user,Иван,ACTIVE,2026-09-17T12:00:00.000Z
-222222222,blocked_example,Анна,BLOCKED,2026-09-17T12:05:00.000Z
+user_id,username,name,status,created_at,request_notified_at
+111111111,example_user,Иван,ACTIVE,2026-09-17T12:00:00.000Z,2026-09-17T12:00:05.000Z
+222222222,blocked_example,Анна,BLOCKED,2026-09-17T12:05:00.000Z,2026-09-17T12:05:05.000Z
+333333333,pending_example,Мария,PENDING,2026-09-19T10:00:00.000Z,2026-09-19T10:00:03.000Z
+444444444,rejected_example,Пётр,REJECTED,2026-09-19T10:10:00.000Z,2026-09-19T10:10:03.000Z

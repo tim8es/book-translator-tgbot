@@ -36,11 +36,39 @@ Older `telegram_offset` rows are ignored by the current workflow and may be dele
 
 | Column | Type | Required | Notes |
 | --- | --- | --- | --- |
-| `user_id` | String | yes | Numeric Telegram user ID; authorization key. |
-| `username` | String | no | Metadata only. |
+| `user_id` | String | yes | Numeric Telegram user ID; unique authorization key. |
+| `username` | String | no | Metadata only; refreshed only by explicit workflow changes. |
 | `name` | String | no | Human-readable name. |
-| `status` | String | yes | `ACTIVE` or `BLOCKED`. |
-| `created_at` | Date | yes | Whitelist creation time. |
+| `status` | String | yes | `PENDING`, `ACTIVE`, `BLOCKED`, or `REJECTED`. |
+| `created_at` | Date | yes | First access-request time or manual whitelist creation time. |
+| `request_notified_at` | Date | no | Set after the administrator notification for a pending request succeeds. |
+
+### Access lifecycle
+
+`bt_bot_users` is both the access registry and the access-request queue:
+
+```text
+new user + /start
+→ PENDING
+→ administrator reviews the row
+→ ACTIVE   (approved)
+   or
+→ REJECTED / BLOCKED
+```
+
+Rules:
+
+- a user absent from `bt_bot_users` is not authorized;
+- the first `/start` from an absent user inserts exactly one row with `status = PENDING`;
+- the row stores the Telegram `user_id`, current username/name metadata and request time;
+- after the administrator notification succeeds, `request_notified_at` is set;
+- a `PENDING` user cannot create translation tasks;
+- repeated `/start` from an already-notified `PENDING` user does not create another row or another normal admin notification;
+- approval is manual: change `status` from `PENDING` to `ACTIVE` in the Data Table;
+- `BLOCKED` and `REJECTED` are denied immediately on the next interaction;
+- authorization always depends on numeric `user_id`, never on username.
+
+If an access-request notification fails before `request_notified_at` is stored, the unacknowledged Telegram update may be retried and the admin notification is attempted again. The `PENDING` row remains the durable source of truth even if Telegram notification delivery is temporarily unavailable.
 
 ## `bt_bot_tasks`
 
@@ -89,6 +117,20 @@ RESULT_PENDING
 `WAITING_RESULT` means the bot is waiting for the administrator to translate manually. `COMPLETE` needs no recovery.
 
 ## Safe inbound acknowledgement
+
+For a first access request:
+
+```text
+receive /start from unknown user
+→ acquire telegram_state lease
+→ insert bt_bot_users row as PENDING
+→ notify administrator
+→ set request_notified_at
+→ confirm request to user
+→ acknowledge Telegram cursor
+```
+
+If notification fails before `request_notified_at` is set, the update remains unacknowledged. On replay, the existing `PENDING` row is reused rather than duplicated.
 
 For a new customer document:
 

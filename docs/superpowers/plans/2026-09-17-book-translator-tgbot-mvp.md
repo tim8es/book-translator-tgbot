@@ -10,7 +10,8 @@
 
 ## Global constraints
 
-- Private allowlist only.
+- Private approval-only access.
+- Unknown users may request access with `/start`, but must remain `PENDING` until manual approval.
 - Numeric Telegram `user_id` is the authorization key.
 - No public webhook requirement.
 - No Redis/RabbitMQ/external queue for MVP.
@@ -95,6 +96,18 @@
 - [x] Generated hardened workflow passed the validator before commit.
 - [x] Ordinary GitHub Actions validation must pass on the clean final branch after migration tooling is removed.
 - [ ] Perform manual n8n/Telegram acceptance tests from `docs/testing.md` in the owner's local environment.
+
+### Task 11: Pending access-request flow
+
+- [x] Reuse `bt_bot_users` as both authorization registry and access-request queue.
+- [x] Add `PENDING` and `REJECTED` user states while preserving `ACTIVE` and `BLOCKED`.
+- [x] Create a `PENDING` row only for an unknown user's `/start`.
+- [x] Send the administrator name, username and numeric user ID without automatically granting access.
+- [x] Persist `request_notified_at` after successful administrator notification.
+- [x] Prevent normal duplicate admin notifications for already-notified `PENDING` users.
+- [x] Keep `PENDING`, `BLOCKED` and `REJECTED` users out of task creation.
+- [x] Keep manual approval explicit: administrator changes `PENDING → ACTIVE`.
+- [x] Update examples, setup, architecture, test matrix and static workflow validator.
 
 ## Known platform limitation
 
