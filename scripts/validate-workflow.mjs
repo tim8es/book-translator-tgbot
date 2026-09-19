@@ -19,7 +19,11 @@ const requiredNodes = [
   'Poll Response Switch', 'Telegram deleteWebhook', 'Validate Webhook Clear',
   'Prepare Poll Lock', 'Acquire Poll Lock', 'Restore Locked Update', 'Message Present Switch',
   'Normalize + Config', 'Role Switch',
-  'Whitelist ACTIVE', 'Whitelist Missing', 'Access Denied',
+  'Get User', 'Resolve User State', 'User Status Switch',
+  'New User Input Switch', 'Insert Pending User', 'Pending Notification Switch',
+  'Prepare Access Request Notification', 'Send Access Request to Admin',
+  'Mark Access Request Notified', 'Send Access Request Confirmation',
+  'Pending Access Reply', 'Access Request Required', 'Access Denied',
   'Customer Input Switch', 'Customer Start', 'Customer Help',
   'Task Update Not Seen', 'Task Update Seen', 'Generate Task Candidates', 'Unused Task Number',
   'Pick Task Number', 'Prepare Task Messages', 'Insert Task',
@@ -158,6 +162,50 @@ for (const extension of ['epub', 'pdf', 'docx', 'txt']) {
   if (!normalizeCode.includes(`'${extension}'`)) errors.push(`Supported extension missing: ${extension}`);
 }
 
+// Customer access request lifecycle.
+if (firstTarget('Role Switch', 1) !== 'Get User') errors.push('Customer role must resolve bt_bot_users row first');
+const getUser = byName.get('Get User');
+if (getUser?.parameters?.dataTableId?.value !== 'bt_bot_users') errors.push('Get User must use bt_bot_users');
+if (!(getUser?.parameters?.filters?.conditions ?? []).some((c) => c.keyName === 'user_id')) errors.push('Get User must match user_id');
+if (getUser?.alwaysOutputData !== true) errors.push('Get User must keep missing-user branch alive');
+
+const resolveUserCode = byName.get('Resolve User State')?.parameters?.jsCode ?? '';
+for (const expected of ['user_status', 'MISSING', 'request_notified_at']) {
+  if (!resolveUserCode.includes(expected)) errors.push(`Resolve User State missing ${expected}`);
+}
+if (firstTarget('Get User') !== 'Resolve User State') errors.push('Get User must feed Resolve User State');
+if (firstTarget('Resolve User State') !== 'User Status Switch') errors.push('Resolved user state must feed User Status Switch');
+if (firstTarget('User Status Switch', 0) !== 'Customer Input Switch') errors.push('ACTIVE user must enter customer flow');
+if (firstTarget('User Status Switch', 1) !== 'Pending Notification Switch') errors.push('PENDING user must enter pending flow');
+if (firstTarget('User Status Switch', 2) !== 'Access Denied') errors.push('Blocked/rejected/unknown status must be denied');
+if (firstTarget('User Status Switch', 3) !== 'New User Input Switch') errors.push('Missing user must enter request gate');
+if (firstTarget('New User Input Switch', 0) !== 'Insert Pending User') errors.push('Unknown /start must insert pending user');
+if (firstTarget('New User Input Switch', 1) !== 'Access Request Required') errors.push('Unknown non-/start input must not create a user');
+
+const pendingInsert = byName.get('Insert Pending User');
+if (pendingInsert?.parameters?.dataTableId?.value !== 'bt_bot_users') errors.push('Insert Pending User must use bt_bot_users');
+const pendingValues = pendingInsert?.parameters?.columns?.value ?? {};
+for (const field of ['user_id','username','name','status','created_at','request_notified_at']) {
+  if (!hasOwn(pendingValues, field)) errors.push(`Insert Pending User must persist ${field}`);
+}
+if (String(pendingValues.status) !== 'PENDING') errors.push('New access requests must start as PENDING');
+if (firstTarget('Insert Pending User') !== 'Prepare Access Request Notification') errors.push('Pending user must feed access notification');
+if (firstTarget('Pending Notification Switch', 0) !== 'Prepare Access Request Notification') errors.push('Unnotified PENDING user must retry admin notification');
+if (firstTarget('Pending Notification Switch', 1) !== 'Pending Access Reply') errors.push('Notified PENDING user must not send normal duplicate admin notification');
+
+const accessTextCode = byName.get('Prepare Access Request Notification')?.parameters?.jsCode ?? '';
+for (const expected of ['username', 'sender_id', 'PENDING', 'ACTIVE']) {
+  if (!accessTextCode.includes(expected)) errors.push(`Access request notification missing ${expected}`);
+}
+if (firstTarget('Prepare Access Request Notification') !== 'Send Access Request to Admin') errors.push('Prepared access request must notify admin');
+if (firstTarget('Send Access Request to Admin') !== 'Mark Access Request Notified') errors.push('Admin notification must be recorded before customer confirmation');
+const notifyValues = byName.get('Mark Access Request Notified')?.parameters?.columns?.value ?? {};
+if (!hasOwn(notifyValues, 'request_notified_at')) errors.push('Admin access notification must persist request_notified_at');
+if (firstTarget('Mark Access Request Notified') !== 'Send Access Request Confirmation') errors.push('Recorded access request must confirm to customer');
+if (firstTarget('Send Access Request Confirmation') !== 'Ack Poll Offset') errors.push('New access request must acknowledge only after confirmation');
+if (firstTarget('Pending Access Reply') !== 'Ack Poll Offset') errors.push('Pending reply must acknowledge only after successful send');
+if (firstTarget('Access Request Required') !== 'Ack Poll Offset') errors.push('Request guidance must acknowledge only after successful send');
+
 // Every offset write must release only the lease owned by this execution.
 for (const name of ['Ack Poll Offset', 'Ack New Task Offset', 'Ack Result Offset']) {
   const node = byName.get(name);
@@ -214,7 +262,7 @@ const done = byName.get('Mark Task Done')?.parameters?.columns?.value ?? {};
 if (String(done.status) !== 'DONE' || String(done.delivery_step) !== 'COMPLETE' || !hasOwn(done, 'completed_at')) errors.push('Completion must persist DONE / COMPLETE / completed_at');
 
 // Conversational messages acknowledge only after successful send.
-for (const name of ['Access Denied','Customer Start','Customer Help','Admin Start','Admin Guidance','Task Not Found','Task Already Done','Task Delivery Pending']) {
+for (const name of ['Access Denied','Pending Access Reply','Access Request Required','Send Access Request Confirmation','Customer Start','Customer Help','Admin Start','Admin Guidance','Task Not Found','Task Already Done','Task Delivery Pending']) {
   if (firstTarget(name) !== 'Ack Poll Offset') errors.push(`${name} must acknowledge cursor only after successful send`);
 }
 
@@ -232,7 +280,7 @@ for (const expected of ['MAX_RECOVERY_ATTEMPTS = 8','MAX_RECOVERIES_PER_RUN = 20
   if (!recoveryCode.includes(expected)) errors.push(`Recovery selector missing ${expected}`);
 }
 
-for (const name of ['Send Admin Task Card','Send Source to Admin','Confirm Task to Customer','Send Translation to Customer']) {
+for (const name of ['Send Access Request to Admin','Send Access Request Confirmation','Send Admin Task Card','Send Source to Admin','Confirm Task to Customer','Send Translation to Customer']) {
   const node = byName.get(name);
   if (node?.retryOnFail !== true || Number(node?.maxTries ?? 0) < 3 || Number(node?.waitBetweenTries ?? 0) < 5000) {
     errors.push(`${name} must use 3 short Telegram retries`);
