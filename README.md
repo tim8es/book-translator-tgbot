@@ -7,12 +7,14 @@ Private Telegram bot for accepting book-translation tasks and returning manually
 1. `Schedule Poll` checks Telegram every 30 seconds with `getUpdates` (`limit=1`).
 2. A short lease in `bt_bot_state` prevents overlapping poll executions from processing the same update.
 3. Access is checked by numeric Telegram `user_id` in `bt_bot_users`.
-4. EPUB/PDF/DOCX/TXT upload creates one six-digit task in `bt_bot_tasks`.
-5. The task and `source_file_id` are persisted before the Telegram cursor is acknowledged.
-6. Admin receives the task card and source file; customer receives confirmation.
-7. Admin replies to the task card with the translated document.
-8. `translated_file_id` and `RESULT_PENDING` are persisted before that inbound update is acknowledged.
-9. The result is sent to the customer; successful delivery ends at `DONE / COMPLETE`.
+4. A first `/start` from an unknown user creates a `PENDING` row and notifies the administrator; it does **not** grant access.
+5. The administrator approves manually by changing that row to `ACTIVE`.
+6. Only an `ACTIVE` user can upload EPUB/PDF/DOCX/TXT and create a six-digit task in `bt_bot_tasks`.
+7. The task and `source_file_id` are persisted before the Telegram cursor is acknowledged.
+8. Admin receives the task card and source file; customer receives confirmation.
+9. Admin replies to the task card with the translated document.
+10. `translated_file_id` and `RESULT_PENDING` are persisted before that inbound update is acknowledged.
+11. The result is sent to the customer; successful delivery ends at `DONE / COMPLETE`.
 
 No webhook, tunnel, reverse proxy, domain, or public HTTPS endpoint is required.
 
@@ -64,7 +66,7 @@ Import `workflows/book-translator-mvp.json` and open **Bot Config**. Locally fil
 
 The repository export intentionally contains no real token and no credential binding. Do not commit your locally configured secret.
 
-Assign the Telegram API credential to all Telegram Send Message / Send Document nodes, add allowed customers to `bt_bot_users` with `status = ACTIVE`, and activate the workflow.
+Assign the Telegram API credential to all Telegram Send Message / Send Document nodes and activate the workflow. You may pre-seed trusted customers with `status = ACTIVE`, but new users can instead request access through `/start`; they are stored as `PENDING` until you manually approve them.
 
 ## Runtime cost
 
