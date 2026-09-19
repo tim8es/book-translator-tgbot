@@ -300,6 +300,14 @@ for (const node of dataTableNodes) {
 
 for (const node of nodes.filter((n) => n.type === 'n8n-nodes-base.telegram' && n.parameters?.operation === 'sendMessage')) {
   if (node.parameters?.additionalFields?.appendAttribution !== false) errors.push(`${node.name}: Append n8n Attribution must be disabled`);
+  if (node.parameters?.additionalFields?.parse_mode !== 'HTML') errors.push(`${node.name}: Parse Mode must be explicitly HTML`);
+}
+
+for (const name of ['Prepare Task Messages', 'Prepare Access Request Notification']) {
+  const code = byName.get(name)?.parameters?.jsCode ?? '';
+  for (const expected of ['escapeHtml', '&amp;', '&lt;', '&gt;']) {
+    if (!code.includes(expected)) errors.push(`${name}: missing HTML escaping token ${expected}`);
+  }
 }
 
 if (errors.length) {
